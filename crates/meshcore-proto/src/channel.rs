@@ -1,10 +1,10 @@
-//! Group channels: key derivation, channel hash, MAC check and decryption.
+//! Group channels: key derivation, channel hash, MAC, encryption and decryption.
 
 use std::borrow::Cow;
 use std::fmt;
 
 use aes::Aes128;
-use aes::cipher::{Array, BlockCipherDecrypt, KeyInit};
+use aes::cipher::{Array, BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use hmac::{Hmac, Mac};
@@ -72,13 +72,11 @@ impl ChannelKey {
         if group.channel_hash != self.hash {
             return None;
         }
-        let mut mac = <HmacSha256 as hmac::KeyInit>::new_from_slice(&self.secret)
-            .expect("HMAC accepts any key length");
+        let mut mac = self.mac();
         mac.update(group.ciphertext);
         mac.verify_truncated_left(&group.mac).ok()?;
 
-        let key: [u8; AES_BLOCK] = self.secret[..AES_BLOCK].try_into().expect("16 bytes");
-        let cipher = Aes128::new(&Array::from(key));
+        let cipher = self.cipher();
         // Encryption zero-pads the final block, so real ciphertext is
         // block-aligned; a stray tail can't be decrypted and is dropped.
         let mut plaintext = Vec::with_capacity(group.ciphertext.len());
@@ -89,6 +87,35 @@ impl ChannelKey {
             plaintext.extend_from_slice(&block);
         }
         Some(plaintext)
+    }
+
+    /// Encrypts `plaintext` into a GRP_TXT or GRP_DATA payload:
+    /// `channel_hash | mac | ciphertext`, zero-padding the last block as the
+    /// firmware does.
+    pub fn encrypt(&self, plaintext: &[u8]) -> Vec<u8> {
+        let cipher = self.cipher();
+        let mut payload = vec![self.hash, 0, 0];
+        for chunk in plaintext.chunks(AES_BLOCK) {
+            let mut padded = [0u8; AES_BLOCK];
+            padded[..chunk.len()].copy_from_slice(chunk);
+            let mut block = aes::Block::from(padded);
+            cipher.encrypt_block(&mut block);
+            payload.extend_from_slice(&block);
+        }
+        let mut mac = self.mac();
+        mac.update(&payload[3..]);
+        payload[1..3].copy_from_slice(&mac.finalize().into_bytes()[..2]);
+        payload
+    }
+
+    fn cipher(&self) -> Aes128 {
+        let key: [u8; AES_BLOCK] = self.secret[..AES_BLOCK].try_into().expect("16 bytes");
+        Aes128::new(&Array::from(key))
+    }
+
+    fn mac(&self) -> HmacSha256 {
+        <HmacSha256 as hmac::KeyInit>::new_from_slice(&self.secret)
+            .expect("HMAC accepts any key length")
     }
 }
 
@@ -172,6 +199,14 @@ impl GroupText {
         })
     }
 
+    /// The inverse of [`parse`](Self::parse), ready for [`ChannelKey::encrypt`].
+    pub fn to_plaintext(&self) -> Vec<u8> {
+        let mut plaintext = self.sender_timestamp.to_le_bytes().to_vec();
+        plaintext.push((self.txt_type << 2) | (self.attempt & 0x03));
+        plaintext.extend_from_slice(&self.text);
+        plaintext
+    }
+
     pub fn text_lossy(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.text)
     }
@@ -221,6 +256,28 @@ mod tests {
             ciphertext: &[0; 16],
         };
         assert_eq!(key.decrypt(&group), None);
+    }
+
+    #[test]
+    fn encrypt_round_trips() {
+        let key = ChannelKey::from_hashtag("#test");
+        let message = GroupText {
+            sender_timestamp: 1_789_000_000,
+            txt_type: 0,
+            attempt: 1,
+            text: b"Bob: a message longer than one block".to_vec(),
+        };
+        let payload = key.encrypt(&message.to_plaintext());
+        let group = GroupPayload {
+            kind: PayloadType::GrpTxt,
+            channel_hash: payload[0],
+            mac: [payload[1], payload[2]],
+            ciphertext: &payload[3..],
+        };
+        assert_eq!(group.channel_hash, key.hash());
+        assert_eq!(group.ciphertext.len() % AES_BLOCK, 0);
+        assert_eq!(key.decrypt(&group).and_then(|p| GroupText::parse(&p)), Some(message));
+        assert_eq!(ChannelKey::from_hashtag("#other").decrypt(&group), None);
     }
 
     #[test]

@@ -1,6 +1,12 @@
 # ferromesh — MeshCore MQTT ingest, store, watch, alert
 
-Status: **phase 0 complete** (2026-09-12): `crates/meshcore-proto` passes the golden test against the pinned capture. Phase 1 next. Prior art in `../mqtt_observer`.
+Status (2026-09-13):
+- **Phase 0 complete:** decoder crate plus golden test.
+- **Phase 1 deployed on truffles:** only the 24h no-loss check is pending.
+- **Phase 2 complete:** API, stream, and `ferromesh tail`/`query`, verified live across a forced server restart.
+- **Next:** phase 3.
+
+Prior art is in `../mqtt_observer`.
 
 ## 0. Decisions so far
 
@@ -130,24 +136,24 @@ alert_events   (id, watch_id, ref_kind, ref_id, ts, delivered JSON)
 ## 4. Key mechanisms
 
 ### 4.1 Backfill-then-live, no gaps or dupes
-Client sends `{filter, kinds, backfill: {last: 200} | {since: "6h"}}`. The server:
-1. Subscribes to the broadcast hub and buffers.
-2. Reads the high-water id `H`, queries with the filter where `id ≤ H`, and streams the results oldest→newest.
-3. Sends `caught_up`, drains the buffer skipping `id ≤ H`, and continues live.
+*Built in phase 2.* A client opens `GET /api/v1/stream?kind=&filter=` with one of `after=<id>` (resume), `since=<time>`, or `last=<n>`; with none it starts live. The server:
+1. Subscribes to the broadcast of newly committed rows.
+2. Reads the newest id `H` for the kind, replays matching history with `id ≤ H` oldest first, and sends `caught_up {last_id}`.
+3. Forwards live events with `id > H` that match the filter.
 
-On broadcast overflow the server sends `resync{last_id}` and the client re-requests from there.
+If a subscriber falls behind the broadcast buffer, the server resubscribes and fills the gap from the database, so the client never has to resync. A client that loses its connection reconnects with `after=<last id it saw>`.
 
 ### 4.2 Stream event kinds
-`message` (decoded, deduped), `packet` (first sighting), `observation` (each reception), `node` (new or changed advert), `status` (observer health), `channel` (added / backfill progress), `alert`.
+Built: `message` (decoded, once per packet), `packet` (first sighting), and `observation` (every reception). Each kind has its own id sequence and its own stream. Still to come: `node` (new or changed advert), `status` (observer health), `channel` (added / backfill progress), `alert`.
 
 ### 4.3 Filter language (TUI, CLI, watches, later web)
+*Built in phase 2* (`ferromesh-model::filter`). Terms must all match, commas give alternatives, a leading `-` negates, and double quotes allow spaces:
 ```
-chan:#bna-bot,#bna-wx  from:"BNABot"  text~"(?i)storm"  since:6h
-type:advert role:repeater
-node:4d1727 type:grp_txt,txt_msg  snr>-5
-observer:Tanyard hops>10
-dm:me                                   (phase 5)
+chan:#bna-bot,#bna-wx  from:BNA*  storm          messages (a bare word searches the body)
+type:advert,grp_txt  node:4d1727  -chan:#test    packets
+observer:Tanyard  snr>-5  rssi<-100  hops>10     observations
 ```
+The same filter compiles to SQL for history and runs in memory for live events. Case folding is ASCII-only on both sides, and a store test checks they select identical rows. Time windows are `--since`/`--until` flags and API parameters, not filter terms. Not yet built: regex text search, `role:`, and `dm:me` (phase 5).
 
 ### 4.4 Channels, back-decode, discovery
 - `ferromesh channels add '#name' | --key <b64>` (TUI too) stores the channel and starts a backfill job: undecrypted GRP_TXT/GRP_DATA with a matching hash → HMAC check → decrypt → `messages`, streamed as progress.
@@ -173,7 +179,7 @@ Things to verify in phase 5: whether the companion can also stay paired to your 
 |---|---|---|
 | 0 ✅ | Workspace + `meshcore-proto` + golden tests from the capture (done 2026-09-12; fixture via `tools/gen_fixture.py`) | All 8,853 packets parse. Computed payload len = MQTT `payload_len` and computed hash = MQTT `hash`. Python results reproduced (426 unique msgs, 1,412 adverts). Advert signatures verify |
 | 1 🟡 | `ferromesh-store` + `ferromeshd` MQTT source + raw log + `import` of old capture + **Docker image & compose on truffles**. Code done 2026-09-13 and tested live from the Mac (serve, import, rebuild with matching digest). Truffles deploy and the 24h run are pending. | Runs 24h on truffles with no loss; `rebuild` from raw gives an identical DB |
-| 2 | API: REST query + WS stream (backfill→live); `ferromesh tail` / `query` | `tail chan:#test --last 50` shows history then live, with no gap or dupe across a forced reconnect |
+| 2 ✅ | API: REST query + WS stream (backfill→live); `ferromesh tail` / `query`. Done 2026-09-13: integration tests cover resume, filters and lag catch-up. A live run across a forced server restart delivered 57 consecutive observation ids, matching the database exactly. | `tail chan:#test --last 50` shows history then live, with no gap or dupe across a forced reconnect |
 | 3 | Dynamic channels + back-decode + discovery (CLI) | `channels add '#chattanooga'` backfills its 37 packets; discovery lists `0x81` etc. |
 | 4 | **TUI**: channels, feed, RF view, nodes, packet inspector, filter bar, watches-as-highlights | Usable from a Mac and a Linux box on the LAN |
 | 5 | Companion source + send: own DMs, contacts, send channel/DM from TUI with ACK status | Send to `#test` from the TUI and see it echoed back via the repeater's MQTT feed |

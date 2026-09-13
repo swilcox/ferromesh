@@ -40,6 +40,15 @@ impl RouteType {
     pub const fn is_flood(self) -> bool {
         matches!(self, Self::TransportFlood | Self::Flood)
     }
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::TransportFlood => "transport-flood",
+            Self::Flood => "flood",
+            Self::Direct => "direct",
+            Self::TransportDirect => "transport-direct",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,6 +107,14 @@ impl PayloadType {
             Self::RawCustom => 0x0F,
             Self::Reserved(nibble) => nibble,
         }
+    }
+
+    /// Parses a name from [`name`](Self::name), ignoring case. Reserved values
+    /// have no name to parse.
+    pub fn from_name(name: &str) -> Option<Self> {
+        (0..16).map(Self::from_nibble).find(|kind| {
+            !matches!(kind, Self::Reserved(_)) && kind.name().eq_ignore_ascii_case(name)
+        })
     }
 
     /// The firmware's name for the type, as used by meshcoretomqtt.

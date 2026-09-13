@@ -14,6 +14,11 @@ client_id = "ferromeshd"
 # password = "..."
 topics = ["meshcore/+/+/packets", "meshcore/+/+/status"]
 
+[api]
+# The HTTP and WebSocket API that ferromesh clients use. Reads are open to anyone
+# who can reach this address.
+listen = "0.0.0.0:7373"
+
 # Channels to decrypt. The public channel is always included.
 # Hashtag channels need only their name. Private channels also need their base64 key:
 #

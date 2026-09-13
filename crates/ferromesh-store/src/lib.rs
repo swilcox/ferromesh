@@ -6,19 +6,26 @@
 //! the set of receptions, never on the order they arrive in, so a database
 //! rebuilt from the raw log matches the live one ([`Store::digest`]).
 //!
+//! The [`Store`] is the single writer. Any number of read-only [`Reader`]s can
+//! query alongside it.
+//!
 //! Timestamps are [`Micros`]: microseconds since the Unix epoch, UTC.
 
 mod digest;
 mod ingest;
+mod read;
 mod schema;
+mod sql;
 
 use std::path::Path;
 use std::time::Duration;
 
+use ferromesh_model::{Event, Filter, Kind};
 use meshcore_proto::ChannelKey;
 use rusqlite::{Connection, params};
 
 pub use ingest::{Batch, ObserverInfo, Outcome, Reception, StatusReport};
+pub use read::{Order, Page, Reader};
 
 /// Microseconds since the Unix epoch, UTC.
 pub type Micros = i64;
@@ -93,10 +100,40 @@ pub struct Counts {
     pub channels: i64,
 }
 
+/// The ids that committed writes created, per kind, in insertion order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub messages: Vec<i64>,
+    pub packets: Vec<i64>,
+    pub observations: Vec<i64>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty() && self.packets.is_empty() && self.observations.is_empty()
+    }
+
+    pub fn ids(&self, kind: Kind) -> &[i64] {
+        match kind {
+            Kind::Messages => &self.messages,
+            Kind::Packets => &self.packets,
+            Kind::Observations => &self.observations,
+        }
+    }
+
+    fn append(&mut self, other: Self) {
+        self.messages.extend(other.messages);
+        self.packets.extend(other.packets);
+        self.observations.extend(other.observations);
+    }
+}
+
 pub struct Store {
     conn: Connection,
     /// Enabled channel keys by id, in the order decryption tries them.
     keys: Vec<(i64, ChannelKey)>,
+    /// Rows created since the last `take_changes`, if tracking.
+    changes: Option<Changes>,
 }
 
 impl Store {
@@ -117,7 +154,7 @@ impl Store {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", true)?;
         schema::migrate(&mut conn)?;
-        let mut store = Self { conn, keys: Vec::new() };
+        let mut store = Self { conn, keys: Vec::new(), changes: None };
         store.add_channel("public", &ChannelKey::public(), ChannelKind::Public, 0)?;
         store.load_keys()?;
         Ok(store)
@@ -182,12 +219,38 @@ impl Store {
         Ok(())
     }
 
+    /// Records which rows each write creates, for [`take_changes`](Self::take_changes).
+    /// Off by default, so imports and rebuilds don't pile up ids.
+    pub fn track_changes(&mut self) {
+        self.changes.get_or_insert_with(Changes::default);
+    }
+
+    /// The rows created since the last call.
+    pub fn take_changes(&mut self) -> Changes {
+        self.changes.as_mut().map(std::mem::take).unwrap_or_default()
+    }
+
     /// Runs `f` in one transaction, committing only if it succeeds.
     pub fn write<T>(&mut self, f: impl FnOnce(&mut Batch<'_>) -> Result<T>) -> Result<T> {
         let mut batch = Batch::new(self.conn.transaction()?, &self.keys);
         let value = f(&mut batch)?;
-        batch.commit()?;
+        let changes = batch.commit()?;
+        if let Some(pending) = &mut self.changes {
+            pending.append(changes);
+        }
         Ok(value)
+    }
+
+    pub fn max_id(&self, kind: Kind) -> Result<i64> {
+        read::max_id(&self.conn, kind)
+    }
+
+    pub fn history(&self, kind: Kind, filter: &Filter, page: &Page) -> Result<Vec<Event>> {
+        read::history(&self.conn, kind, filter, page)
+    }
+
+    pub fn events(&self, kind: Kind, ids: &[i64]) -> Result<Vec<Event>> {
+        read::events(&self.conn, kind, ids)
     }
 
     pub fn counts(&self) -> Result<Counts> {

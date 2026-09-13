@@ -110,6 +110,17 @@ pub enum NodeRole {
 }
 
 impl NodeRole {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Unspecified => "unspecified",
+            Self::Chat => "chat",
+            Self::Repeater => "repeater",
+            Self::RoomServer => "room-server",
+            Self::Sensor => "sensor",
+            Self::Other(_) => "other",
+        }
+    }
+
     /// The role is the low nibble of the advert flags.
     pub const fn from_flags(flags: u8) -> Self {
         match flags & 0x0F {

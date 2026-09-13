@@ -11,7 +11,7 @@ use meshcore_proto::{
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
-use crate::{Micros, Result};
+use crate::{Changes, Micros, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObserverInfo {
@@ -81,15 +81,18 @@ enum DecodeState {
 pub struct Batch<'a> {
     tx: Transaction<'a>,
     keys: &'a [(i64, ChannelKey)],
+    changes: Changes,
 }
 
 impl<'a> Batch<'a> {
     pub(crate) fn new(tx: Transaction<'a>, keys: &'a [(i64, ChannelKey)]) -> Self {
-        Self { tx, keys }
+        Self { tx, keys, changes: Changes::default() }
     }
 
-    pub(crate) fn commit(self) -> Result<()> {
-        Ok(self.tx.commit()?)
+    /// Commits, returning the rows this batch created.
+    pub(crate) fn commit(self) -> Result<Changes> {
+        self.tx.commit()?;
+        Ok(self.changes)
     }
 
     pub fn record_reception(&mut self, reception: &Reception) -> Result<Outcome> {
@@ -131,6 +134,7 @@ impl<'a> Batch<'a> {
         if inserted == 0 {
             return Ok(Outcome::Duplicate);
         }
+        self.changes.observations.push(self.tx.last_insert_rowid());
 
         self.tx
             .prepare_cached(
@@ -217,7 +221,12 @@ impl<'a> Batch<'a> {
             .optional()?)
     }
 
-    fn insert_packet(&self, packet: &Packet<'_>, hash: &PacketHash, rx_at: Micros) -> Result<i64> {
+    fn insert_packet(
+        &mut self,
+        packet: &Packet<'_>,
+        hash: &PacketHash,
+        rx_at: Micros,
+    ) -> Result<i64> {
         let decoded = packet.decode_payload();
         let (state, channel_hash) = match &decoded {
             Err(_) => (DecodeState::Malformed, None),
@@ -240,6 +249,7 @@ impl<'a> Batch<'a> {
                 state as i64,
             ])?;
         let packet_id = self.tx.last_insert_rowid();
+        self.changes.packets.push(packet_id);
 
         match decoded {
             Ok(Payload::Group(group)) => self.decrypt_group(packet_id, &group, rx_at)?,
@@ -252,7 +262,7 @@ impl<'a> Batch<'a> {
     /// Tries the enabled channel keys; on a match, marks the packet decrypted
     /// and records GRP_TXT as a message.
     fn decrypt_group(
-        &self,
+        &mut self,
         packet_id: i64,
         group: &GroupPayload<'_>,
         first_seen_at: Micros,
@@ -291,6 +301,7 @@ impl<'a> Batch<'a> {
                 sender,
                 body,
             ])?;
+        self.changes.messages.push(self.tx.last_insert_rowid());
         Ok(())
     }
 

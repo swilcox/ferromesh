@@ -9,25 +9,32 @@ publish = false
 license = "MIT"
 
 [workspace.dependencies]
+ferromesh-model = { path = "crates/ferromesh-model" }
 ferromesh-store = { path = "crates/ferromesh-store" }
 meshcore-proto = { path = "crates/meshcore-proto" }
 
 aes = "0.9"
 anyhow = "1"
+axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 ed25519-dalek = "3"
+futures-util = "0.3"
 hex = "0.4"
 hmac = "0.13"
 jiff = { version = "0.2", features = ["serde"] }
+owo-colors = { version = "4", features = ["supports-colors"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rumqttc = { version = "0.25", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_urlencoded = "0.7"
 sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-tungstenite = "0.30"
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

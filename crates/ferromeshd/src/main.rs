@@ -1,20 +1,12 @@
-//! ferromeshd: records MeshCore traffic from MQTT into a raw log and database.
-
-mod config;
-mod import;
-mod meshcoretomqtt;
-mod pipeline;
-mod rawlog;
-mod rebuild;
-mod serve;
+//! ferromeshd: records MeshCore traffic from MQTT and serves it to clients.
 
 use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use ferromeshd::config::Config;
+use ferromeshd::{import, pipeline, rebuild, serve};
 use tracing_subscriber::EnvFilter;
-
-use crate::config::Config;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -29,7 +21,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Subscribe to MQTT and record everything that arrives.
+    /// Subscribe to MQTT, record everything that arrives, and serve the API.
     Serve,
     /// Load a JSONL capture written by the Python mqtt_observer watcher.
     Import {

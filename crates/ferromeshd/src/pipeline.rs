@@ -1,11 +1,15 @@
-//! Raw records into the store; shared by serve, import and rebuild.
+//! Raw records into the store, and new rows out to stream subscribers.
+//! Shared by serve, import and rebuild.
 
 use std::fmt;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use ferromesh_model::{Event, Kind};
 use ferromesh_store::{ChannelKind, Counts, Outcome, Store};
 use jiff::Timestamp;
 use meshcore_proto::ChannelKey;
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use crate::config::Config;
@@ -118,6 +122,19 @@ pub fn ingest(store: &mut Store, records: &[RawRecord], tally: &mut Tally) -> Re
         Ok(())
     })?;
     tally.add(batch_tally);
+    Ok(())
+}
+
+/// Broadcasts events for the rows stored since the last call. The store must
+/// be tracking changes.
+pub fn publish(store: &mut Store, events: &broadcast::Sender<Arc<Event>>) -> Result<()> {
+    let changes = store.take_changes();
+    for kind in Kind::ALL {
+        for event in store.events(kind, changes.ids(kind))? {
+            // Having no subscribers right now is fine.
+            let _ = events.send(Arc::new(event));
+        }
+    }
     Ok(())
 }
 
