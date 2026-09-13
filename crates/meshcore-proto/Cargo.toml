@@ -1,0 +1,23 @@
+[package]
+name = "meshcore-proto"
+version = "0.1.0"
+description = "MeshCore packet parsing, hashing, advert verification and channel decryption"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+aes.workspace = true
+base64.workspace = true
+ed25519-dalek.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
