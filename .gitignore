@@ -1,5 +1,7 @@
 /target
 /data
+# Local config can hold private channel keys; ferromesh.example.toml is the template.
+/ferromesh.toml
 *.db
 *.db-wal
 *.db-shm

@@ -26,8 +26,8 @@ Source: `../mqtt_observer/meshcore_packets.jsonl`, 9,193 lines, 02:54–21:24 UT
 | Broker | `truffles.local:1883`, Mosquitto 2.1.2, anonymous read OK (shared with teslamate) |
 | Topics | `meshcore/BNA/<observer-pubkey>/packets` and `.../status` (meshcoretomqtt format) |
 | Observer | one: "Tanyard", Heltec V4, fw `v1.17.1.3-observer`, 910.525 MHz / 62.5 kHz / SF7 / CR5 |
-| Rate | 479 receptions/hour ≈ 11.5k/day ≈ 4.2M/year |
-| Dedupe | 8,853 receptions → 4,359 unique packets (2.03 copies avg, max 6) |
+| Rate | ≈311 receptions/hour ≈ 7.5k/day ≈ 2.7M/year. Corrected 2026-09-13: the Python capture wrote 3,254 lines twice between 03:01 and 15:30 UTC, and the first count included them. |
+| Dedupe | 5,749 receptions → 4,359 unique packets (1.32 copies avg, max 6). The 9,193-line phase 0 fixture still contains the doubled lines, which is harmless for decode tests. |
 | Size | avg 85 bytes raw per reception |
 | Mix | GRP_TXT 2292, ANON_REQ 1815, ADVERT 1412, REQ 1170, RESPONSE 795, PATH 718, TXT_MSG 549, ACK 43, CONTROL 42, GRP_DATA 16, TRACE 1 |
 | Path hash size | varies per packet: 1-byte 2214, 2-byte 4107, 3-byte 2553 — parser must honor `path_len` bits 6–7 |
@@ -77,8 +77,8 @@ Principles:
 | `meshcore-proto` | Pure, no I/O. Header/transport/path/payload parse, packet hash, advert parse + Ed25519 verify, GRP_TXT/GRP_DATA decrypt | `aes`, `hmac`, `sha2`, `ed25519-dalek` |
 | `ferromesh-model` | Shared types: events, filter AST + parser, API/WS wire protocol | `serde`, `chrono` |
 | `ferromesh-store` | Schema, migrations, single writer thread, filter → SQL | `rusqlite` (bundled, FTS5) |
-| `ferromeshd` | Sources (MQTT, later companion), decode pipeline, broadcast hub, axum API, watch engine | `tokio`, `rumqttc`, `axum`, `tracing`; later `meshcore-rs` |
-| `ferromesh` (client) | `tui`, `tail`, `query`, `channels`, `watches`, `import`, later `send` | `ratatui`, `crossterm`, `tokio-tungstenite`, `clap` |
+| `ferromeshd` | Sources (MQTT, later companion), raw log, decode pipeline, broadcast hub, axum API, watch engine. Admin subcommands `import`, `rebuild` and `stats` work on the data directory directly | `tokio`, `rumqttc`, `zstd`, `jiff`, `axum`, `tracing`; later `meshcore-rs` |
+| `ferromesh` (client) | `tui`, `tail`, `query`, `channels`, `watches`, later `send` | `ratatui`, `crossterm`, `tokio-tungstenite`, `clap` |
 
 External crates evaluated:
 - `MeshCore` 0.0.1 (packet parsing, Nov 2025): self-described "very early, API in flux", 11% documented. **Write our own `meshcore-proto`** and use `michaelhart/meshcore-decoder` plus our Python decoder as test oracles.
@@ -87,6 +87,7 @@ External crates evaluated:
 ### Deployment on truffles
 - Multi-stage Dockerfile (rust builder → debian-slim/distroless) and a compose service with a `./data` volume (db + raw log) and a TOML config.
 - `network_mode: host`, so the container reaches the broker without depending on `.local` mDNS inside Docker and can advertise itself on mDNS for clients. Alternative: if mosquitto is itself a compose service, join its network and use the service name.
+- meshcoretomqtt publishes at **QoS 0 with no retain**, so the broker never queues for ferromeshd: anything published while it's down is gone. Keep restarts short (`restart: unless-stopped`) and backfill gaps with `ferromeshd import` from another capture if needed. Imported copies of messages already stored count as duplicates.
 - Phase 5: pass the companion's USB device into the container (`devices: /dev/serial/by-id/...`), or point it at a WiFi companion's `host:5000`.
 - Clients: release binaries for macOS arm64 and Linux amd64 (and `cargo install` for development).
 
@@ -171,7 +172,7 @@ Things to verify in phase 5: whether the companion can also stay paired to your 
 | # | Deliverable | Exit criteria |
 |---|---|---|
 | 0 ✅ | Workspace + `meshcore-proto` + golden tests from the capture (done 2026-09-12; fixture via `tools/gen_fixture.py`) | All 8,853 packets parse. Computed payload len = MQTT `payload_len` and computed hash = MQTT `hash`. Python results reproduced (426 unique msgs, 1,412 adverts). Advert signatures verify |
-| 1 | `store` + `ferromeshd` MQTT source + raw log + `import` of old capture + **Docker image & compose on truffles** | Runs 24h on truffles with no loss; `rebuild` from raw gives an identical DB |
+| 1 🟡 | `ferromesh-store` + `ferromeshd` MQTT source + raw log + `import` of old capture + **Docker image & compose on truffles**. Code done 2026-09-13 and tested live from the Mac (serve, import, rebuild with matching digest). Truffles deploy and the 24h run are pending. | Runs 24h on truffles with no loss; `rebuild` from raw gives an identical DB |
 | 2 | API: REST query + WS stream (backfill→live); `ferromesh tail` / `query` | `tail chan:#test --last 50` shows history then live, with no gap or dupe across a forced reconnect |
 | 3 | Dynamic channels + back-decode + discovery (CLI) | `channels add '#chattanooga'` backfills its 37 packets; discovery lists `0x81` etc. |
 | 4 | **TUI**: channels, feed, RF view, nodes, packet inspector, filter bar, watches-as-highlights | Usable from a Mac and a Linux box on the LAN |

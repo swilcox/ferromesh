@@ -1,0 +1,61 @@
+# ferromeshd configuration. Copy to ferromesh.toml and adjust.
+
+# Holds ferromesh.db and the raw/ MQTT log. In the container this is the /data volume.
+data_dir = "/data"
+
+[mqtt]
+# Inside the container (host networking) a broker on the same machine is 127.0.0.1:
+# .local names don't resolve in containers. From another machine use truffles.local.
+host = "127.0.0.1"
+port = 1883
+# Must be unique per running instance, or the broker keeps disconnecting one of them.
+client_id = "ferromeshd"
+# username = "ferromesh"
+# password = "..."
+topics = ["meshcore/+/+/packets", "meshcore/+/+/status"]
+
+# Channels to decrypt. The public channel is always included.
+# Hashtag channels need only their name. Private channels also need their base64 key:
+#
+# [[channel]]
+# name = "My Group"
+# key = "BASE64_16_BYTE_KEY_HERE=="
+
+[[channel]]
+name = "#test"
+
+[[channel]]
+name = "#bna-bot"
+
+[[channel]]
+name = "#chat"
+
+[[channel]]
+name = "#bot"
+
+[[channel]]
+name = "#nashmesh"
+
+[[channel]]
+name = "#weather"
+
+[[channel]]
+name = "#info"
+
+[[channel]]
+name = "#tn-middle"
+
+[[channel]]
+name = "#tn-williamson"
+
+[[channel]]
+name = "#bna-wx"
+
+[[channel]]
+name = "#wx"
+
+[[channel]]
+name = "#southeast"
+
+[[channel]]
+name = "#atlanta"

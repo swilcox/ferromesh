@@ -1,0 +1,8 @@
+target
+data
+.git
+.code-review-graph
+ferromesh.toml
+*.db
+*.db-wal
+*.db-shm

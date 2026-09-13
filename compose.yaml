@@ -1,0 +1,17 @@
+# Run on truffles:
+#   cp ferromesh.example.toml ferromesh.toml   # then edit
+#   mkdir -p data                              # before first start, so it isn't root-owned
+#   docker compose up -d --build
+services:
+  ferromeshd:
+    build: .
+    image: ferromesh/ferromeshd:latest
+    container_name: ferromeshd
+    restart: unless-stopped
+    # Reaches a broker on the host or in another container publishing 1883,
+    # and later lets clients discover the server over mDNS.
+    network_mode: host
+    user: "${FERROMESH_UID:-1000}:${FERROMESH_GID:-1000}"
+    volumes:
+      - ./data:/data
+      - ./ferromesh.toml:/config/ferromesh.toml:ro
