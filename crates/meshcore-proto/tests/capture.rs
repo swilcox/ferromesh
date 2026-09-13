@@ -1,6 +1,9 @@
 //! Golden test: parse a real capture and compare against the independent
 //! Python decoder (see `tools/gen_fixture.py`). Mismatches are collected and
 //! reported together, so one run shows the whole picture.
+//!
+//! The capture is real traffic, so it isn't committed. Without it these tests
+//! skip, unless `FERROMESH_REQUIRE_FIXTURES` is set.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -73,9 +76,29 @@ static CAPTURE: LazyLock<Capture> = LazyLock::new(|| Capture {
     summary: serde_json::from_str(&fixture("summary.json")).expect("fixture summary"),
 });
 
+fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
+}
+
 fn fixture(name: &str) -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+    let path = fixture_dir().join(name);
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// True when the fixture hasn't been generated, in which case the test should
+/// return early. Panics instead if `FERROMESH_REQUIRE_FIXTURES` is set.
+fn fixture_missing() -> bool {
+    let dir = fixture_dir();
+    if dir.join("capture.jsonl").exists() {
+        return false;
+    }
+    assert!(
+        std::env::var_os("FERROMESH_REQUIRE_FIXTURES").is_none(),
+        "no fixture in {}; run tools/gen_fixture.py",
+        dir.display()
+    );
+    eprintln!("skipping: no fixture in {} (see tools/gen_fixture.py)", dir.display());
+    true
 }
 
 fn records_of(kind: PayloadType) -> impl Iterator<Item = &'static (Record, Vec<u8>)> {
@@ -112,6 +135,9 @@ fn assert_no_failures(what: &str, failures: &[String]) {
 
 #[test]
 fn framing_matches_observer_metadata() {
+    if fixture_missing() {
+        return;
+    }
     assert_eq!(CAPTURE.records.len(), CAPTURE.summary.packets);
 
     let mut failures = Vec::new();
@@ -149,6 +175,9 @@ fn framing_matches_observer_metadata() {
 
 #[test]
 fn every_payload_parses() {
+    if fixture_missing() {
+        return;
+    }
     let failures: Vec<String> = CAPTURE
         .records
         .iter()
@@ -164,6 +193,9 @@ fn every_payload_parses() {
 
 #[test]
 fn adverts_match_python_and_verify() {
+    if fixture_missing() {
+        return;
+    }
     let mut failures = Vec::new();
     let mut decoded = 0;
     for (record, raw) in records_of(PayloadType::Advert) {
@@ -217,6 +249,9 @@ fn adverts_match_python_and_verify() {
 
 #[test]
 fn tampered_advert_fails_verification() {
+    if fixture_missing() {
+        return;
+    }
     let (_, raw) = records_of(PayloadType::Advert)
         .find(|(record, _)| record.advert.is_some())
         .expect("capture has adverts");
@@ -232,6 +267,9 @@ fn tampered_advert_fails_verification() {
 
 #[test]
 fn channel_messages_match_python() {
+    if fixture_missing() {
+        return;
+    }
     let keyring = keyring();
     let mut failures = Vec::new();
     let (mut decrypted, mut undecrypted) = (0, 0);

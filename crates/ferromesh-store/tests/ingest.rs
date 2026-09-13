@@ -1,6 +1,7 @@
 //! Ingest the meshcore-proto capture fixture and check what the store derives.
 
 use std::collections::HashSet;
+use std::path::Path;
 
 use ferromesh_store::{ChannelKind, ObserverInfo, Outcome, Reception, StatusReport, Store};
 use meshcore_proto::ChannelKey;
@@ -33,7 +34,18 @@ struct Fixture {
     channels: Vec<String>,
 }
 
-fn fixture() -> Fixture {
+/// The fixture is real traffic, so it isn't committed; tools/gen_fixture.py
+/// builds it. Without it these tests skip, unless FERROMESH_REQUIRE_FIXTURES
+/// is set.
+fn fixture() -> Option<Fixture> {
+    if !Path::new(FIXTURES).join("capture.jsonl").exists() {
+        assert!(
+            std::env::var_os("FERROMESH_REQUIRE_FIXTURES").is_none(),
+            "no fixture in {FIXTURES}; run tools/gen_fixture.py"
+        );
+        eprintln!("skipping: no fixture in {FIXTURES} (see tools/gen_fixture.py)");
+        return None;
+    }
     let read = |name: &str| std::fs::read_to_string(format!("{FIXTURES}/{name}")).unwrap();
     let records: Vec<Record> =
         read("capture.jsonl").lines().map(|line| serde_json::from_str(line).unwrap()).collect();
@@ -58,7 +70,7 @@ fn fixture() -> Fixture {
             direction: None,
         })
         .collect();
-    Fixture { records, receptions, channels }
+    Some(Fixture { records, receptions, channels })
 }
 
 fn tanyard() -> ObserverInfo {
@@ -89,7 +101,7 @@ fn distinct<'a>(hashes: impl Iterator<Item = &'a str>) -> i64 {
 
 #[test]
 fn counts_match_the_capture() {
-    let f = fixture();
+    let Some(f) = fixture() else { return };
     let mut store = store_with(&f.channels);
     let outcomes = ingest(&mut store, &f.receptions);
     assert!(outcomes.iter().all(|outcome| matches!(outcome, Outcome::Recorded { .. })));
@@ -114,7 +126,7 @@ fn counts_match_the_capture() {
 
 #[test]
 fn reingesting_changes_nothing() {
-    let f = fixture();
+    let Some(f) = fixture() else { return };
     let mut store = store_with(&f.channels);
     ingest(&mut store, &f.receptions);
     let (digest, counts) = (store.digest().unwrap(), store.counts().unwrap());
@@ -127,7 +139,7 @@ fn reingesting_changes_nothing() {
 
 #[test]
 fn arrival_order_does_not_matter() {
-    let f = fixture();
+    let Some(f) = fixture() else { return };
     let mut forward = store_with(&f.channels);
     ingest(&mut forward, &f.receptions);
 

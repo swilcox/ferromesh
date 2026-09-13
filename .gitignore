@@ -2,6 +2,9 @@
 /data
 # Local config can hold private channel keys; ferromesh.example.toml is the template.
 /ferromesh.toml
+# Real captured traffic: other people's messages and node positions.
+# Generate locally with tools/gen_fixture.py.
+/crates/meshcore-proto/tests/fixtures/
 *.db
 *.db-wal
 *.db-shm

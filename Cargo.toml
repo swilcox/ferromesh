@@ -6,6 +6,7 @@ members = ["crates/*"]
 edition = "2024"
 rust-version = "1.94"
 publish = false
+license = "MIT"
 
 [workspace.dependencies]
 ferromesh-store = { path = "crates/ferromesh-store" }

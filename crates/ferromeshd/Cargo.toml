@@ -5,6 +5,7 @@ description = "ferromesh server: records MeshCore traffic from MQTT into a raw l
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 anyhow.workspace = true

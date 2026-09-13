@@ -5,6 +5,7 @@ description = "SQLite storage for ferromesh: packets, observations, and what the
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 hex.workspace = true

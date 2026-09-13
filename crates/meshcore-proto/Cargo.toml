@@ -5,6 +5,7 @@ description = "MeshCore packet parsing, hashing, advert verification and channel
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 aes.workspace = true
