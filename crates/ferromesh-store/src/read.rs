@@ -1,18 +1,20 @@
 //! Queries shared by the read-only [`Reader`] and the writing
-//! [`Store`](crate::Store): history pages, events by id, and the newest id.
+//! [`Store`](crate::Store): history pages, events by id, the newest id, and
+//! channel summaries.
 
 use std::path::Path;
 use std::time::Duration;
 
 use ferromesh_model::{
-    Advert, DecodeState, Event, Filter, Kind, MessageEvent, ObservationEvent, PacketEvent,
+    Advert, ChannelInfo, DecodeState, Event, Filter, GuessChannels, GuessReport, Kind,
+    MessageEvent, ObservationEvent, PacketEvent, UnknownChannel,
 };
 use jiff::Timestamp;
 use meshcore_proto::{Header, NodeRole, PayloadType};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OpenFlags, Row, params_from_iter};
 
-use crate::{Micros, Result, sql};
+use crate::{Micros, Result, guess, sql};
 
 /// A read-only connection; any number can run alongside the writer.
 pub struct Reader {
@@ -39,6 +41,18 @@ impl Reader {
 
     pub fn events(&self, kind: Kind, ids: &[i64]) -> Result<Vec<Event>> {
         events(&self.conn, kind, ids)
+    }
+
+    pub fn channel_infos(&self) -> Result<Vec<ChannelInfo>> {
+        channel_infos(&self.conn, None)
+    }
+
+    pub fn unknown_channels(&self) -> Result<Vec<UnknownChannel>> {
+        unknown_channels(&self.conn)
+    }
+
+    pub fn guess_channels(&self, request: &GuessChannels) -> Result<GuessReport> {
+        guess::guess_channels(&self.conn, request)
     }
 }
 
@@ -192,6 +206,60 @@ pub(crate) fn events(conn: &Connection, kind: Kind, ids: &[i64]) -> Result<Vec<E
     Ok(events)
 }
 
+/// Every channel, or just `id`, with its message count.
+pub(crate) fn channel_infos(conn: &Connection, id: Option<i64>) -> Result<Vec<ChannelInfo>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT c.name, c.kind, c.hash, c.enabled, c.added_at, count(m.id), max(m.first_seen_at)
+         FROM channels c
+         LEFT JOIN messages m ON m.channel_id = c.id
+         WHERE ?1 IS NULL OR c.id = ?1
+         GROUP BY c.id
+         ORDER BY c.id",
+    )?;
+    let channels = stmt
+        .query_map([id], |row| {
+            Ok(ChannelInfo {
+                name: row.get(0)?,
+                kind: row.get(1)?,
+                hash: row.get(2)?,
+                enabled: row.get(3)?,
+                added_at: timestamp(row, 4)?,
+                messages: row.get(5)?,
+                last_message_at: optional_timestamp(row, 6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(channels)
+}
+
+/// Channel hashes on packets no known key opens, busiest first.
+pub(crate) fn unknown_channels(conn: &Connection) -> Result<Vec<UnknownChannel>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT p.channel_hash, count(*), sum(p.observation_count), sum(p.payload_type = 5),
+                sum(p.payload_type = 6), min(p.first_seen_at), max(p.last_seen_at),
+                (SELECT c.name FROM channels c WHERE c.hash = p.channel_hash ORDER BY c.id LIMIT 1)
+         FROM packets p
+         WHERE p.decode_state = 1
+         GROUP BY p.channel_hash
+         ORDER BY count(*) DESC, p.channel_hash",
+    )?;
+    let unknown = stmt
+        .query_map([], |row| {
+            Ok(UnknownChannel {
+                hash: row.get(0)?,
+                packets: row.get(1)?,
+                heard: row.get(2)?,
+                text_packets: row.get(3)?,
+                data_packets: row.get(4)?,
+                first_seen_at: timestamp(row, 5)?,
+                last_seen_at: timestamp(row, 6)?,
+                shares_hash_with: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(unknown)
+}
+
 fn message(row: &Row<'_>) -> rusqlite::Result<Event> {
     Ok(Event::Message(MessageEvent {
         id: row.get(0)?,
@@ -288,6 +356,14 @@ fn decode_state(row: &Row<'_>, index: usize) -> rusqlite::Result<DecodeState> {
 }
 
 fn timestamp(row: &Row<'_>, index: usize) -> rusqlite::Result<Timestamp> {
-    Timestamp::from_microsecond(row.get(index)?)
+    to_timestamp(index, row.get(index)?)
+}
+
+fn optional_timestamp(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<Timestamp>> {
+    row.get::<_, Option<Micros>>(index)?.map(|micros| to_timestamp(index, micros)).transpose()
+}
+
+fn to_timestamp(index: usize, micros: Micros) -> rusqlite::Result<Timestamp> {
+    Timestamp::from_microsecond(micros)
         .map_err(|e| rusqlite::Error::FromSqlConversionFailure(index, Type::Integer, Box::new(e)))
 }

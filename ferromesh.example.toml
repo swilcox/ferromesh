@@ -18,6 +18,10 @@ topics = ["meshcore/+/+/packets", "meshcore/+/+/status"]
 # The HTTP and WebSocket API that ferromesh clients use. Reads are open to anyone
 # who can reach this address.
 listen = "0.0.0.0:7373"
+# Changes such as adding channels need this token (at least 16 characters), sent by
+# clients as --token or FERROMESH_TOKEN. Without it the API is read-only.
+# Generate one with: openssl rand -hex 24
+# token = "..."
 
 # Channels to decrypt. The public channel is always included.
 # Hashtag channels need only their name. Private channels also need their base64 key:

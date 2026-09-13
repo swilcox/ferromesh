@@ -11,3 +11,4 @@ pub mod pipeline;
 pub mod rawlog;
 pub mod rebuild;
 pub mod serve;
+pub mod writer;

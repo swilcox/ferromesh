@@ -4,7 +4,7 @@ Records and explores [MeshCore](https://github.com/meshcore-dev/MeshCore) mesh t
 
 A MeshCore repeater running observer firmware (or [meshcoretomqtt](https://github.com/Cisien/meshcoretomqtt)) publishes every packet it hears to an MQTT broker. ferromesh subscribes, keeps every message verbatim, decodes what it can (adverts, plus channel messages for channels you know), stores it all in SQLite, and serves it to clients that show history and follow live traffic.
 
-**Status:** early. Decoding, storage, the API and a command-line client work. A terminal UI, back-decoding for newly added channels, alerts and sending are planned; see [PLAN.md](PLAN.md).
+**Status:** early. Decoding, storage, the API, channel discovery and a command-line client work. A terminal UI, alerts and sending are planned; see [PLAN.md](PLAN.md).
 
 ## Layout
 
@@ -12,9 +12,9 @@ A MeshCore repeater running observer firmware (or [meshcoretomqtt](https://githu
 |---|---|
 | `crates/meshcore-proto` | Packet parsing, hashing, advert signature checks, channel encryption and decryption. No I/O. |
 | `crates/ferromesh-model` | Events, the filter language, and the API's wire format, shared by server and clients. |
-| `crates/ferromesh-store` | SQLite schema, ingest and queries. |
+| `crates/ferromesh-store` | SQLite schema, ingest, queries and channel backfill. |
 | `crates/ferromeshd` | The server: MQTT ingest, raw log, HTTP/WebSocket API, and `import`, `rebuild`, `stats` commands. |
-| `crates/ferromesh` | The command-line client: `tail` and `query`. |
+| `crates/ferromesh` | The command-line client: `tail`, `query` and `channels`. |
 | `tools/gen_fixture.py` | Builds the golden-test fixture from a capture. |
 
 ## Running the server
@@ -31,7 +31,7 @@ mkdir -p data
 docker compose up -d --build
 ```
 
-The container uses host networking, so set `mqtt.host` to `127.0.0.1`; `.local` names don't resolve inside containers. The API listens on port 7373.
+The container uses host networking, so set `mqtt.host` to `127.0.0.1`; `.local` names don't resolve inside containers. The API listens on port 7373. Anyone who can reach it can read; changes, such as adding channels, need `api.token` set in the config and sent by clients.
 
 Every MQTT message is appended to `data/raw/` before it reaches the database, so the database can always be recreated:
 
@@ -58,7 +58,28 @@ ferromesh query --kind packets type:advert --json
 
 Filters are space-separated terms that must all match: `chan:#test,#wx`, `from:BNA*`, a bare word to search message text, `type:advert`, `node:4d1727`, `observer:Tanyard`, and `'snr>-5'`, `'rssi<-100'` or `'hops>2'` for observations. A leading `-` negates a term. Quote `>` and `<` so the shell leaves them alone, and put double quotes around values with spaces: `'from:"BNA Bot"'`. One quoted argument can hold a whole filter: `'type:advert snr>-5'`.
 
-The API itself is small: `GET /api/v1/{messages,packets,observations}?filter=&limit=&since=&until=` returns history, and a WebSocket at `/api/v1/stream?kind=&filter=&last=` sends history and then live events. See `crates/ferromesh-model/src/wire.rs`.
+## Channels
+
+Everything is stored, including channel traffic nobody can read yet, so adding a channel later decodes its history too:
+
+```sh
+ferromesh channels                            # what the server decrypts
+ferromesh channels unknown                    # channel hashes on traffic no known key opens
+ferromesh channels guess chattanooga tn-east  # try hashtag names, plus common and mentioned ones
+export FERROMESH_TOKEN=...                    # the server's api.token
+ferromesh channels add '#chattanooga'         # add it and decrypt what was waiting
+ferromesh channels add 'My Group' --key BASE64KEY
+```
+
+Hashtag channels derive their key from the name, which is why guessing works; private channels need their key. A guess only counts when the key both passes the packet's MAC and decrypts to readable text. Channels listed in the server's config are added, and backfilled, at startup.
+
+## The API
+
+- `GET /api/v1/{messages,packets,observations}?filter=&limit=&since=&until=` returns history.
+- A WebSocket at `/api/v1/stream?kind=&filter=&last=` sends history and then live events.
+- `GET /api/v1/channels`, `GET /api/v1/channels/unknown`, `POST /api/v1/channels/guess`, and `POST /api/v1/channels` (with `Authorization: Bearer <token>`) manage channels.
+
+See `crates/ferromesh-model/src/wire.rs`.
 
 ## Tests
 
@@ -72,7 +93,7 @@ The golden tests check the decoder against an independent Python decoder over a 
 tools/gen_fixture.py --capture path/to/meshcore_packets.jsonl --decoder path/to/decoder-dir --lines 9193
 ```
 
-Set `FERROMESH_REQUIRE_FIXTURES=1` to make missing fixtures fail the tests instead of skipping them.
+Set `FERROMESH_REQUIRE_FIXTURES=1` to make missing fixtures fail the tests instead of skipping them. CI runs formatting, clippy and the tests on every push.
 
 ## License
 

@@ -5,6 +5,14 @@
 //! - `GET /api/v1/stream` with a [`StreamQuery`] upgrades to a WebSocket of
 //!   JSON [`Frame`]s: history oldest first, then [`Frame::CaughtUp`], then
 //!   live events as they're stored.
+//! - `GET /api/v1/channels` returns [`ChannelInfo`](crate::ChannelInfo)s, and
+//!   `POST` with an [`AddChannel`](crate::AddChannel) adds one, decrypting stored
+//!   traffic it opens. Changes need `Authorization: Bearer <api.token>`.
+//! - `GET /api/v1/channels/unknown` returns [`UnknownChannel`](crate::UnknownChannel)s.
+//! - `POST /api/v1/channels/guess` with [`GuessChannels`](crate::GuessChannels)
+//!   returns a [`GuessReport`](crate::GuessReport).
+//!
+//! Errors are JSON `{"error": "..."}` with a matching HTTP status.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};

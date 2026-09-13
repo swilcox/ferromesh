@@ -3,8 +3,8 @@
 //! Observer reports go in as [`Reception`]s. The store keeps one row per
 //! packet (keyed by packet hash), one per observation, and whatever the packet
 //! decodes to: adverts, nodes, channel messages. Derived rows depend only on
-//! the set of receptions, never on the order they arrive in, so a database
-//! rebuilt from the raw log matches the live one ([`Store::digest`]).
+//! the set of receptions and channels, never on the order they arrive in, so a
+//! database rebuilt from the raw log matches the live one ([`Store::digest`]).
 //!
 //! The [`Store`] is the single writer. Any number of read-only [`Reader`]s can
 //! query alongside it.
@@ -12,6 +12,7 @@
 //! Timestamps are [`Micros`]: microseconds since the Unix epoch, UTC.
 
 mod digest;
+mod guess;
 mod ingest;
 mod read;
 mod schema;
@@ -20,15 +21,21 @@ mod sql;
 use std::path::Path;
 use std::time::Duration;
 
-use ferromesh_model::{Event, Filter, Kind};
+use ferromesh_model::{
+    Backfill, ChannelInfo, Event, Filter, GuessChannels, GuessReport, Kind, UnknownChannel,
+};
 use meshcore_proto::ChannelKey;
 use rusqlite::{Connection, params};
 
+pub use guess::BUILTIN_NAMES;
 pub use ingest::{Batch, ObserverInfo, Outcome, Reception, StatusReport};
 pub use read::{Order, Page, Reader};
 
 /// Microseconds since the Unix epoch, UTC.
 pub type Micros = i64;
+
+/// Packets per transaction when decrypting stored traffic for a new channel.
+const BACKFILL_BATCH: usize = 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -161,7 +168,8 @@ impl Store {
     }
 
     /// Adds a channel unless one with the same secret exists. Returns whether
-    /// it was added.
+    /// it was added. Stored packets aren't touched until
+    /// [`backfill_channel`](Self::backfill_channel).
     pub fn add_channel(
         &mut self,
         name: &str,
@@ -219,6 +227,29 @@ impl Store {
         Ok(())
     }
 
+    /// Decrypts stored packets that were waiting for a channel's key, one
+    /// batch per transaction. The messages it creates show up in
+    /// [`take_changes`](Self::take_changes) like any others.
+    pub fn backfill_channel(&mut self, channel_id: i64) -> Result<Backfill> {
+        let key = self.keys.iter().find(|(id, _)| *id == channel_id).map(|(_, key)| key.clone());
+        let Some(key) = key else {
+            return Ok(Backfill::default());
+        };
+        let mut total = Backfill::default();
+        let mut after = 0;
+        loop {
+            let (progress, last) =
+                self.write(|batch| batch.backfill(channel_id, &key, after, BACKFILL_BATCH))?;
+            total.checked += progress.checked;
+            total.decrypted += progress.decrypted;
+            total.messages += progress.messages;
+            match last {
+                Some(last) => after = last,
+                None => return Ok(total),
+            }
+        }
+    }
+
     /// Records which rows each write creates, for [`take_changes`](Self::take_changes).
     /// Off by default, so imports and rebuilds don't pile up ids.
     pub fn track_changes(&mut self) {
@@ -251,6 +282,22 @@ impl Store {
 
     pub fn events(&self, kind: Kind, ids: &[i64]) -> Result<Vec<Event>> {
         read::events(&self.conn, kind, ids)
+    }
+
+    pub fn channel_infos(&self) -> Result<Vec<ChannelInfo>> {
+        read::channel_infos(&self.conn, None)
+    }
+
+    pub fn channel_info(&self, id: i64) -> Result<Option<ChannelInfo>> {
+        Ok(read::channel_infos(&self.conn, Some(id))?.pop())
+    }
+
+    pub fn unknown_channels(&self) -> Result<Vec<UnknownChannel>> {
+        read::unknown_channels(&self.conn)
+    }
+
+    pub fn guess_channels(&self, request: &GuessChannels) -> Result<GuessReport> {
+        guess::guess_channels(&self.conn, request)
     }
 
     pub fn counts(&self) -> Result<Counts> {

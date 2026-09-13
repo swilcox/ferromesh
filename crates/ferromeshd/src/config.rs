@@ -3,9 +3,12 @@
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use ferromesh_model::DEFAULT_PORT;
 use serde::Deserialize;
+
+/// Shorter tokens are too easy to guess over the LAN.
+const MIN_TOKEN_LEN: usize = 16;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -40,17 +43,21 @@ pub struct ApiConfig {
     /// Where the HTTP and WebSocket API listens.
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
+    /// The bearer token clients need to change anything, such as adding a
+    /// channel. Without one the API is read-only.
+    pub token: Option<String>,
 }
 
 impl Default for ApiConfig {
     fn default() -> Self {
-        Self { listen: default_listen() }
+        Self { listen: default_listen(), token: None }
     }
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChannelConfig {
+    /// `#name` for a hashtag channel; any name for a channel with a `key`.
     pub name: String,
     /// Base64 secret for a private channel; hashtag channels derive theirs
     /// from the name.
@@ -61,7 +68,18 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let text =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+        Self::parse(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    fn parse(text: &str) -> Result<Self> {
+        let config: Self = toml::from_str(text)?;
+        if let Some(token) = &config.api.token {
+            ensure!(
+                token.len() >= MIN_TOKEN_LEN,
+                "api.token must be at least {MIN_TOKEN_LEN} characters"
+            );
+        }
+        Ok(config)
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -93,20 +111,34 @@ fn default_listen() -> SocketAddr {
 mod tests {
     use super::*;
 
+    const MINIMAL: &str = "data_dir = \"/data\"\n[mqtt]\nhost = \"127.0.0.1\"\n";
+
     #[test]
     fn example_config_parses() {
         let example = concat!(env!("CARGO_MANIFEST_DIR"), "/../../ferromesh.example.toml");
         let config = Config::load(Path::new(example)).unwrap();
         assert_eq!(config.mqtt.port, 1883);
         assert_eq!(config.api.listen.port(), DEFAULT_PORT);
+        assert_eq!(config.api.token, None);
         assert!(config.channels.iter().all(|channel| channel.key.is_none()));
         assert!(!config.channels.is_empty());
     }
 
     #[test]
     fn api_section_is_optional() {
-        let config: Config =
-            toml::from_str("data_dir = \"/data\"\n[mqtt]\nhost = \"127.0.0.1\"\n").unwrap();
+        let config = Config::parse(MINIMAL).unwrap();
         assert_eq!(config.api.listen, default_listen());
+        assert_eq!(config.api.token, None);
+    }
+
+    #[test]
+    fn tokens_must_be_long_enough() {
+        let with_token =
+            |token: &str| Config::parse(&format!("{MINIMAL}[api]\ntoken = \"{token}\"\n"));
+        assert!(with_token("short").is_err());
+        assert_eq!(
+            with_token("a-long-enough-token").unwrap().api.token.as_deref(),
+            Some("a-long-enough-token")
+        );
     }
 }

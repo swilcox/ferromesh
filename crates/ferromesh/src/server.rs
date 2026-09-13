@@ -1,4 +1,5 @@
-//! Talking to ferromeshd: history over HTTP, live traffic over a WebSocket.
+//! Talking to ferromeshd: history and channels over HTTP, live traffic over a
+//! WebSocket.
 
 use std::time::Duration;
 
@@ -8,6 +9,8 @@ use ferromesh_model::{
 };
 use futures_util::StreamExt;
 use jiff::Timestamp;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::{self, Message};
 
@@ -39,18 +42,49 @@ impl Server {
         Self { base }
     }
 
-    fn url(&self, path: &str, query: &impl serde::Serialize) -> Result<String> {
-        Ok(format!("{}{path}?{}", self.base, serde_urlencoded::to_string(query)?))
+    pub async fn get<T: DeserializeOwned>(&self, path_and_query: &str) -> Result<T> {
+        let response = reqwest::get(format!("{}{path_and_query}", self.base))
+            .await
+            .with_context(|| format!("can't reach {}", self.base))?;
+        decode(response).await
+    }
+
+    pub async fn post<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        token: Option<&str>,
+    ) -> Result<T> {
+        let mut request = reqwest::Client::new().post(format!("{}{path}", self.base)).json(body);
+        if let Some(token) = token {
+            request = request.bearer_auth(token);
+        }
+        let response =
+            request.send().await.with_context(|| format!("can't reach {}", self.base))?;
+        decode(response).await
+    }
+
+    fn path(&self, path: &str, query: &impl Serialize) -> Result<String> {
+        Ok(format!("{path}?{}", serde_urlencoded::to_string(query)?))
     }
 
     fn stream_url(&self, query: &StreamQuery) -> Result<String> {
-        let url = self.url("/api/v1/stream", query)?;
+        let url = format!("{}{}", self.base, self.path("/api/v1/stream", query)?);
         Ok(match url.split_once("://") {
             Some(("https", rest)) => format!("wss://{rest}"),
             Some((_, rest)) => format!("ws://{rest}"),
             None => url,
         })
     }
+}
+
+async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        bail!("{}", error_message(status.as_u16(), &body));
+    }
+    response.json().await.context("unexpected response from the server")
 }
 
 pub enum Start {
@@ -69,15 +103,8 @@ pub async fn query(
 ) -> Result<()> {
     let query =
         HistoryQuery { filter, limit: Some(limit), since, until, ..HistoryQuery::default() };
-    let url = server.url(&format!("/api/v1/{kind}"), &query)?;
-    let response =
-        reqwest::get(&url).await.with_context(|| format!("can't reach {}", server.base))?;
-    let status = response.status();
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        bail!("{}", error_message(status.as_u16(), &body));
-    }
-    let mut events: Vec<Event> = response.json().await.context("unexpected response")?;
+    let mut events: Vec<Event> =
+        server.get(&server.path(&format!("/api/v1/{kind}"), &query)?).await?;
     events.reverse();
     for event in &events {
         printer.event(event)?;

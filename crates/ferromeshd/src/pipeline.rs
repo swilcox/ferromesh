@@ -1,11 +1,11 @@
-//! Raw records into the store, and new rows out to stream subscribers.
-//! Shared by serve, import and rebuild.
+//! Raw records into the store, new rows out to stream subscribers, and
+//! channels in. Shared by serve, import and rebuild.
 
 use std::fmt;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
-use ferromesh_model::{Event, Kind};
+use anyhow::{Context, Result, bail, ensure};
+use ferromesh_model::{ChannelAdded, ChannelInfo, Event, Kind};
 use ferromesh_store::{ChannelKind, Counts, Outcome, Store};
 use jiff::Timestamp;
 use meshcore_proto::ChannelKey;
@@ -26,22 +26,61 @@ pub fn open_store(config: &Config) -> Result<Store> {
     Ok(store)
 }
 
+/// Adds channels from the config that the database lacks, decrypting stored
+/// traffic for each, just as adding one through the API does.
 pub fn add_configured_channels(store: &mut Store, config: &Config) -> Result<()> {
-    let now = Timestamp::now().as_microsecond();
     for channel in &config.channels {
-        let (key, kind) = match &channel.key {
-            Some(key) => (
-                ChannelKey::from_base64(key)
-                    .with_context(|| format!("channel {:?}", channel.name))?,
-                ChannelKind::Key,
-            ),
-            None => (ChannelKey::from_hashtag(&channel.name), ChannelKind::Hashtag),
-        };
-        if store.add_channel(&channel.name, &key, kind, now)? {
-            info!(channel = %channel.name, "added channel");
+        let name = channel.name.trim();
+        let (key, kind) = channel_key(name, channel.key.as_deref())?;
+        if let AddOutcome::Added(added) = add_channel(store, name, &key, kind)? {
+            info!(channel = %name, decrypted = added.backfill.decrypted, "added channel");
         }
     }
     Ok(())
+}
+
+/// A hashtag channel (`#name`) derives its key from the name; any other
+/// channel needs its base64 key.
+pub fn channel_key(name: &str, key: Option<&str>) -> Result<(ChannelKey, ChannelKind)> {
+    ensure!(!name.is_empty(), "channel name is empty");
+    match key {
+        Some(key) => Ok((
+            ChannelKey::from_base64(key).with_context(|| format!("channel {name:?}"))?,
+            ChannelKind::Key,
+        )),
+        None if name.starts_with('#') && name.len() > 1 => {
+            Ok((ChannelKey::from_hashtag(name), ChannelKind::Hashtag))
+        }
+        None => bail!("channel {name:?}: hashtag channels start with #; others need a key"),
+    }
+}
+
+pub enum AddOutcome {
+    Added(ChannelAdded),
+    /// A channel with this key already exists.
+    Exists(ChannelInfo),
+}
+
+/// Adds a channel and decrypts stored packets that were waiting for its key.
+pub fn add_channel(
+    store: &mut Store,
+    name: &str,
+    key: &ChannelKey,
+    kind: ChannelKind,
+) -> Result<AddOutcome> {
+    let added = store.add_channel(name, key, kind, Timestamp::now().as_microsecond())?;
+    let id = store
+        .channels()?
+        .into_iter()
+        .find(|row| row.key == *key)
+        .map(|row| row.id)
+        .context("channel missing after adding it")?;
+    if !added {
+        return Ok(AddOutcome::Exists(store.channel_info(id)?.context("channel missing")?));
+    }
+    let backfill = store.backfill_channel(id)?;
+    let channel = store.channel_info(id)?.context("channel missing after adding it")?;
+    Ok(AddOutcome::Added(ChannelAdded { channel, backfill }))
 }
 
 #[derive(Debug, Default, Clone, Copy)]
@@ -154,4 +193,21 @@ pub fn format_counts(counts: &Counts) -> String {
     .map(|(label, count)| format!("{label:<15}{count:>10}"))
     .collect::<Vec<_>>()
     .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn channel_keys() {
+        let (key, kind) = channel_key("#test", None).unwrap();
+        assert_eq!((key, kind), (ChannelKey::from_hashtag("#test"), ChannelKind::Hashtag));
+        let (_, kind) = channel_key("Family", Some("izOH6cXN6mrJ5e26oRXNcg==")).unwrap();
+        assert_eq!(kind, ChannelKind::Key);
+        assert!(channel_key("test", None).is_err());
+        assert!(channel_key("#", None).is_err());
+        assert!(channel_key("", None).is_err());
+        assert!(channel_key("Family", Some("not base64")).is_err());
+    }
 }

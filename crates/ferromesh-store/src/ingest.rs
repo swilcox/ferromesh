@@ -3,8 +3,10 @@
 //! Every derived value is order-independent: seen windows use min/max, counts
 //! only grow on first sight, and node fields come from the newest signed
 //! advert by (advert timestamp, packet hash). Replaying the same receptions in
-//! any order therefore produces the same database.
+//! any order therefore produces the same database, and so does adding a
+//! channel later and backfilling it.
 
+use ferromesh_model::Backfill;
 use meshcore_proto::{
     Advert, ChannelKey, GroupPayload, GroupText, Packet, PacketHash, Payload, PayloadType,
     split_sender,
@@ -189,6 +191,47 @@ impl<'a> Batch<'a> {
         Ok(inserted > 0)
     }
 
+    /// Tries `key` on up to `limit` undecrypted packets carrying its hash,
+    /// after packet id `after`. Returns what it did and the last id examined,
+    /// or `None` once there are no packets left to try.
+    pub(crate) fn backfill(
+        &mut self,
+        channel_id: i64,
+        key: &ChannelKey,
+        after: i64,
+        limit: usize,
+    ) -> Result<(Backfill, Option<i64>)> {
+        let waiting: Vec<(i64, u8, Vec<u8>, Micros)> = self
+            .tx
+            .prepare_cached(
+                "SELECT id, payload_type, payload, first_seen_at FROM packets
+                 WHERE decode_state = 1 AND channel_hash = ?1 AND id > ?2
+                 ORDER BY id LIMIT ?3",
+            )?
+            .query_map(params![key.hash(), after, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+
+        let mut progress = Backfill::default();
+        for (packet_id, payload_type, payload, first_seen_at) in &waiting {
+            progress.checked += 1;
+            let Ok(Payload::Group(group)) =
+                Payload::parse(PayloadType::from_nibble(*payload_type), payload)
+            else {
+                continue;
+            };
+            let Some(plaintext) = key.decrypt(&group) else {
+                continue;
+            };
+            progress.decrypted += 1;
+            if self.record_decryption(*packet_id, channel_id, &group, &plaintext, *first_seen_at)? {
+                progress.messages += 1;
+            }
+        }
+        Ok((progress, waiting.last().map(|(id, ..)| *id)))
+    }
+
     /// The name and region follow the most recent report.
     fn upsert_observer(&self, observer: &ObserverInfo, seen_at: Micros) -> Result<i64> {
         Ok(self
@@ -252,36 +295,41 @@ impl<'a> Batch<'a> {
         self.changes.packets.push(packet_id);
 
         match decoded {
-            Ok(Payload::Group(group)) => self.decrypt_group(packet_id, &group, rx_at)?,
+            Ok(Payload::Group(group)) => {
+                let opened = self
+                    .keys
+                    .iter()
+                    .find_map(|(id, key)| key.decrypt(&group).map(|plain| (*id, plain)));
+                if let Some((channel_id, plaintext)) = opened {
+                    self.record_decryption(packet_id, channel_id, &group, &plaintext, rx_at)?;
+                }
+            }
             Ok(Payload::Advert(advert)) => self.record_advert(packet_id, hash, &advert, rx_at)?,
             _ => {}
         }
         Ok(packet_id)
     }
 
-    /// Tries the enabled channel keys; on a match, marks the packet decrypted
-    /// and records GRP_TXT as a message.
-    fn decrypt_group(
+    /// Marks a packet decrypted by a channel and, for GRP_TXT, records its
+    /// message. Returns whether a message was recorded.
+    fn record_decryption(
         &mut self,
         packet_id: i64,
+        channel_id: i64,
         group: &GroupPayload<'_>,
+        plaintext: &[u8],
         first_seen_at: Micros,
-    ) -> Result<()> {
-        let Some((channel_id, plaintext)) =
-            self.keys.iter().find_map(|(id, key)| key.decrypt(group).map(|plain| (*id, plain)))
-        else {
-            return Ok(());
-        };
+    ) -> Result<bool> {
         self.tx
             .prepare_cached("UPDATE packets SET channel_id = ?2, decode_state = ?3 WHERE id = ?1")?
             .execute(params![packet_id, channel_id, DecodeState::Decrypted as i64])?;
 
         // GRP_DATA decrypts too, but has no text layout to record yet.
         if group.kind != PayloadType::GrpTxt {
-            return Ok(());
+            return Ok(false);
         }
-        let Some(message) = GroupText::parse(&plaintext) else {
-            return Ok(());
+        let Some(message) = GroupText::parse(plaintext) else {
+            return Ok(false);
         };
         let text = message.text_lossy();
         let (sender, body) = split_sender(&text);
@@ -302,7 +350,7 @@ impl<'a> Batch<'a> {
                 body,
             ])?;
         self.changes.messages.push(self.tx.last_insert_rowid());
-        Ok(())
+        Ok(true)
     }
 
     fn record_advert(

@@ -1,11 +1,8 @@
-//! `ferromeshd serve`: subscribe, log raw, store, and serve the API.
+//! `ferromeshd serve`: subscribe to MQTT, feed the writer, and serve the API.
 
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use ferromesh_model::Event;
-use ferromesh_store::Store;
 use jiff::Timestamp;
 use rumqttc::{AsyncClient, Event as MqttEvent, MqttOptions, Packet, QoS};
 use tokio::net::TcpListener;
@@ -15,15 +12,13 @@ use tracing::{info, warn};
 
 use crate::api::{self, AppState};
 use crate::config::Config;
-use crate::pipeline::{self, Tally};
+use crate::pipeline;
 use crate::rawlog::{RawLogWriter, RawRecord};
+use crate::writer::{self, Job};
 
-/// Messages that arrive together share one transaction and one fsync.
-const MAX_BATCH: usize = 512;
 /// Live events buffered per subscriber; one that falls further behind is
 /// caught up from the database.
 const EVENT_BUFFER: usize = 1024;
-const REPORT_EVERY: Duration = Duration::from_secs(600);
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 
 pub async fn run(config: Config) -> Result<()> {
@@ -35,26 +30,27 @@ pub async fn run(config: Config) -> Result<()> {
 
     let (events, _) = broadcast::channel(EVENT_BUFFER);
     let (stop, stopped) = watch::channel(false);
-    let api = tokio::spawn(api::serve(
-        listener,
-        AppState::new(config.db_path(), events.clone(), stopped),
-    ));
-    info!(listen = %config.api.listen, "API listening");
+    let (jobs, queue) = mpsc::channel(4096);
+    let state = AppState::new(config.db_path(), events.clone(), stopped)
+        .with_writer(jobs.clone(), config.api.token.clone());
+    let api = tokio::spawn(api::serve(listener, state));
+    let changes = if config.api.token.is_some() { "with token" } else { "disabled" };
+    info!(listen = %config.api.listen, changes, "API listening");
 
-    let (records, incoming) = mpsc::channel(4096);
     let writer = std::thread::Builder::new()
         .name("writer".into())
-        .spawn(move || write_loop(store, raw, incoming, events))?;
+        .spawn(move || writer::run(store, raw, queue, events))?;
 
-    // Returning drops the sender, which lets the writer drain and stop.
-    let subscribed = subscribe(&config, records).await;
+    let subscribed = subscribe(&config, jobs).await;
+    // Stopping the API releases its handle on the writer, which then drains
+    // what's queued and stops.
     let _ = stop.send(true);
     let served = api.await.map_err(|_| anyhow!("API task panicked"))?.context("API server");
     let written = writer.join().map_err(|_| anyhow!("writer thread panicked"))?;
     written.and(subscribed).and(served)
 }
 
-async fn subscribe(config: &Config, records: mpsc::Sender<RawRecord>) -> Result<()> {
+async fn subscribe(config: &Config, jobs: mpsc::Sender<Job>) -> Result<()> {
     let mqtt = &config.mqtt;
     let source = format!("mqtt://{}:{}", mqtt.host, mqtt.port);
     let mut options = MqttOptions::new(&mqtt.client_id, &mqtt.host, mqtt.port);
@@ -94,7 +90,7 @@ async fn subscribe(config: &Config, records: mpsc::Sender<RawRecord>) -> Result<
                     topic,
                     payload,
                 };
-                if records.send(record).await.is_err() {
+                if jobs.send(Job::Record(record)).await.is_err() {
                     bail!("writer stopped");
                 }
             }
@@ -106,35 +102,5 @@ async fn subscribe(config: &Config, records: mpsc::Sender<RawRecord>) -> Result<
         }
     }
     info!("shutting down");
-    Ok(())
-}
-
-fn write_loop(
-    mut store: Store,
-    mut raw: RawLogWriter,
-    mut incoming: mpsc::Receiver<RawRecord>,
-    events: broadcast::Sender<Arc<Event>>,
-) -> Result<()> {
-    store.track_changes();
-    let mut tally = Tally::default();
-    let mut last_report = Instant::now();
-    let mut batch = Vec::with_capacity(MAX_BATCH);
-    while let Some(first) = incoming.blocking_recv() {
-        batch.push(first);
-        while batch.len() < MAX_BATCH {
-            let Ok(record) = incoming.try_recv() else { break };
-            batch.push(record);
-        }
-        // Raw log first: if the database write fails, a rebuild still has it.
-        raw.append(&batch)?;
-        pipeline::ingest(&mut store, &batch, &mut tally)?;
-        pipeline::publish(&mut store, &events)?;
-        batch.clear();
-        if last_report.elapsed() >= REPORT_EVERY {
-            info!(%tally, "ingested");
-            last_report = Instant::now();
-        }
-    }
-    info!(%tally, "ingested");
     Ok(())
 }

@@ -6,19 +6,23 @@ use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::header::AUTHORIZATION;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use ferromesh_model::{
-    DEFAULT_HISTORY_LIMIT, Event, Filter, Frame, Health, HistoryQuery, Kind, MAX_HISTORY_LIMIT,
-    StreamQuery,
+    AddChannel, ChannelInfo, DEFAULT_HISTORY_LIMIT, Event, Filter, Frame, GuessChannels,
+    GuessReport, Health, HistoryQuery, Kind, MAX_HISTORY_LIMIT, StreamQuery, UnknownChannel,
 };
 use ferromesh_store::{Micros, Order, Page, Reader};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, warn};
+
+use crate::pipeline::{self, AddOutcome};
+use crate::writer::Job;
 
 /// Rows per database round trip while replaying history into a stream.
 const REPLAY_PAGE: usize = 500;
@@ -31,6 +35,10 @@ pub struct AppState {
     db_path: Arc<PathBuf>,
     events: broadcast::Sender<Arc<Event>>,
     shutdown: watch::Receiver<bool>,
+    /// Where changes go; without it the API is read-only.
+    writer: Option<mpsc::Sender<Job>>,
+    /// The bearer token changes require; without it changes are refused.
+    token: Option<Arc<str>>,
 }
 
 impl AppState {
@@ -41,7 +49,15 @@ impl AppState {
         events: broadcast::Sender<Arc<Event>>,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
-        Self { db_path: Arc::new(db_path), events, shutdown }
+        Self { db_path: Arc::new(db_path), events, shutdown, writer: None, token: None }
+    }
+
+    /// Accepts changes, handed to the writer thread, from clients presenting
+    /// `token`. With no token, changes stay refused.
+    pub fn with_writer(mut self, writer: mpsc::Sender<Job>, token: Option<String>) -> Self {
+        self.writer = Some(writer);
+        self.token = token.map(Arc::from);
+        self
     }
 }
 
@@ -49,6 +65,9 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/stream", get(stream))
+        .route("/api/v1/channels", get(list_channels).post(add_channel))
+        .route("/api/v1/channels/unknown", get(unknown_channels))
+        .route("/api/v1/channels/guess", post(guess_channels))
         .route("/api/v1/{kind}", get(history))
         .with_state(state)
 }
@@ -86,11 +105,79 @@ async fn history(
         limit: query.limit.unwrap_or(DEFAULT_HISTORY_LIMIT).clamp(1, MAX_HISTORY_LIMIT),
         order: Order::Descending,
     };
-    let events =
-        read(Arc::clone(&state.db_path), move |reader| reader.history(kind, &filter, &page))
-            .await
-            .map_err(ApiError::internal)?;
+    let events = read(&state, move |reader| reader.history(kind, &filter, &page)).await?;
     Ok(Json(events))
+}
+
+async fn list_channels(State(state): State<AppState>) -> Result<Json<Vec<ChannelInfo>>, ApiError> {
+    Ok(Json(read(&state, |reader| reader.channel_infos()).await?))
+}
+
+async fn unknown_channels(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<UnknownChannel>>, ApiError> {
+    Ok(Json(read(&state, |reader| reader.unknown_channels()).await?))
+}
+
+async fn guess_channels(
+    State(state): State<AppState>,
+    Json(request): Json<GuessChannels>,
+) -> Result<Json<GuessReport>, ApiError> {
+    Ok(Json(read(&state, move |reader| reader.guess_channels(&request)).await?))
+}
+
+async fn add_channel(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AddChannel>,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers)?;
+    let writer_gone =
+        || ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "the server can't make changes");
+    let writer = state.writer.clone().ok_or_else(writer_gone)?;
+    let name = request.name.trim().to_owned();
+    let (key, kind) = pipeline::channel_key(&name, request.key.as_deref())
+        .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+
+    let (reply, outcome) = oneshot::channel();
+    writer.send(Job::AddChannel { name, key, kind, reply }).await.map_err(|_| writer_gone())?;
+    match outcome.await.map_err(|_| writer_gone())? {
+        Ok(AddOutcome::Added(added)) => Ok((StatusCode::CREATED, Json(added)).into_response()),
+        Ok(AddOutcome::Exists(existing)) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("that key already belongs to channel {}", existing.name),
+        )),
+        Err(error) => Err(ApiError::internal(error)),
+    }
+}
+
+/// Changes need the configured bearer token; with none configured they're off.
+fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(expected) = &state.token else {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "changes are disabled on this server: set api.token in its config",
+        ));
+    };
+    let presented = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    match presented {
+        Some(token) if same_secret(token.as_bytes(), expected.as_bytes()) => Ok(()),
+        Some(_) => Err(ApiError::new(StatusCode::UNAUTHORIZED, "wrong token")),
+        None => Err(ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            "this change needs a token: pass --token or set FERROMESH_TOKEN",
+        )),
+    }
+}
+
+/// Compares every byte, so response timing doesn't reveal how much of a
+/// guessed token was right.
+fn same_secret(presented: &[u8], expected: &[u8]) -> bool {
+    presented.len() == expected.len()
+        && presented.iter().zip(expected).fold(0, |diff, (a, b)| diff | (a ^ b)) == 0
 }
 
 async fn stream(
@@ -122,8 +209,16 @@ fn parse_filter(text: Option<&str>, kind: Kind) -> Result<Filter, ApiError> {
     Ok(filter)
 }
 
-/// Runs a query on its own read-only connection, off the async runtime.
+/// An HTTP handler's query, on its own read-only connection.
 async fn read<T: Send + 'static>(
+    state: &AppState,
+    query: impl FnOnce(&Reader) -> ferromesh_store::Result<T> + Send + 'static,
+) -> Result<T, ApiError> {
+    blocking_read(Arc::clone(&state.db_path), query).await.map_err(ApiError::internal)
+}
+
+/// Runs a query on its own read-only connection, off the async runtime.
+async fn blocking_read<T: Send + 'static>(
     db_path: Arc<PathBuf>,
     query: impl FnOnce(&Reader) -> ferromesh_store::Result<T> + Send + 'static,
 ) -> anyhow::Result<T> {
@@ -239,7 +334,7 @@ impl Stream {
 
     fn max_id(&self) -> impl Future<Output = anyhow::Result<i64>> + Send + use<> {
         let (db_path, kind) = (Arc::clone(&self.state.db_path), self.kind);
-        read(db_path, move |reader| reader.max_id(kind))
+        blocking_read(db_path, move |reader| reader.max_id(kind))
     }
 
     fn history(
@@ -248,7 +343,7 @@ impl Stream {
     ) -> impl Future<Output = anyhow::Result<Vec<Event>>> + Send + use<> {
         let (db_path, kind, filter) =
             (Arc::clone(&self.state.db_path), self.kind, Arc::clone(&self.filter));
-        read(db_path, move |reader| reader.history(kind, &filter, &page))
+        blocking_read(db_path, move |reader| reader.history(kind, &filter, &page))
     }
 
     async fn send_events(&mut self, events: Vec<Event>) -> anyhow::Result<()> {
@@ -285,5 +380,17 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(serde_json::json!({ "error": self.message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_secret;
+
+    #[test]
+    fn secrets_compare_whole() {
+        assert!(same_secret(b"open-sesame", b"open-sesame"));
+        assert!(!same_secret(b"open-sesamE", b"open-sesame"));
+        assert!(!same_secret(b"open", b"open-sesame"));
     }
 }

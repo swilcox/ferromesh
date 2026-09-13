@@ -1,5 +1,6 @@
 //! ferromesh: the command-line client for a ferromeshd server.
 
+mod channels;
 mod render;
 mod server;
 mod when;
@@ -9,7 +10,7 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ferromesh_model::{Filter, Kind};
+use ferromesh_model::{Filter, GuessChannels, Kind};
 
 use crate::render::Printer;
 use crate::server::{Server, Start};
@@ -31,6 +32,10 @@ struct Cli {
     /// The ferromeshd server: a URL, or host[:port].
     #[arg(long, short, global = true, env = "FERROMESH_SERVER", default_value = "localhost")]
     server: String,
+
+    /// Token for changes such as adding channels (the server's api.token).
+    #[arg(long, global = true, env = "FERROMESH_TOKEN", hide_env_values = true)]
+    token: Option<String>,
 
     #[command(subcommand)]
     command: Command,
@@ -79,6 +84,50 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// The channels the server decrypts, and finding more. Lists them by default.
+    Channels {
+        #[command(subcommand)]
+        command: Option<ChannelsCommand>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ChannelsCommand {
+    /// List the channels the server decrypts.
+    List {
+        /// Print one JSON channel per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Add a channel and decrypt stored traffic that was waiting for it.
+    /// Quote the name in the shell: '#wx'.
+    Add {
+        /// `#name` for a hashtag channel, or any name with --key.
+        name: String,
+        /// The base64 secret of a private channel.
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Channel hashes on stored traffic that no known key opens.
+    Unknown {
+        /// Print one JSON entry per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Try hashtag names against undecrypted traffic.
+    Guess {
+        /// Names to try, with or without #.
+        names: Vec<String>,
+        /// Skip the server's list of common names.
+        #[arg(long)]
+        no_builtin: bool,
+        /// Skip hashtags mentioned in decoded messages.
+        #[arg(long)]
+        no_mentions: bool,
+        /// Add every channel found.
+        #[arg(long)]
+        add: bool,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -103,6 +152,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<()> {
     let server = Server::new(&cli.server);
+    let token = cli.token.as_deref();
     match cli.command {
         Command::Tail { filter, kind, last, since, live, json } => {
             let filter = filter_text(&filter, kind)?;
@@ -118,6 +168,17 @@ async fn run(cli: Cli) -> Result<()> {
             let window = (since.map(When::at), until.map(When::at));
             server::query(&server, kind, filter, limit, window, Printer::new(json)).await
         }
+        Command::Channels { command } => match command
+            .unwrap_or(ChannelsCommand::List { json: false })
+        {
+            ChannelsCommand::List { json } => channels::list(&server, json).await,
+            ChannelsCommand::Add { name, key } => channels::add(&server, name, key, token).await,
+            ChannelsCommand::Unknown { json } => channels::unknown(&server, json).await,
+            ChannelsCommand::Guess { names, no_builtin, no_mentions, add } => {
+                let request = GuessChannels { names, builtin: !no_builtin, mentions: !no_mentions };
+                channels::guess(&server, request, add, token).await
+            }
+        },
     }
 }
 

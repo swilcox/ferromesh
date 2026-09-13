@@ -4,7 +4,8 @@ Status (2026-09-13):
 - **Phase 0 complete:** decoder crate plus golden test.
 - **Phase 1 deployed on truffles:** only the 24h no-loss check is pending.
 - **Phase 2 complete:** API, stream, and `ferromesh tail`/`query`, verified live across a forced server restart.
-- **Next:** phase 3.
+- **Phase 3 complete:** channels, back-decode and discovery, verified live on real data.
+- **Next:** phase 4 (TUI).
 
 Prior art is in `../mqtt_observer`.
 
@@ -16,7 +17,7 @@ Prior art is in `../mqtt_observer`.
 | Host | **truffles**: amd64 Linux with Docker and plenty of resources. The server ships as a container (docker compose). |
 | Data scope | **Your own repeater's local feed first.** It works without internet. NashMesh-wide ingest is an optional later add-on; the design stays multi-source so it slots in cleanly. |
 | Database | **SQLite** (WAL) plus a verbatim raw MQTT log. See §3. |
-| Channels | **Dynamic.** Stored in the DB and seeded from `channels.json`. Adding one decodes past traffic too. Discovery helps find more. |
+| Channels | **Dynamic.** Stored in the DB, seeded from the config's `[[channel]]` list, and added through the API or `ferromesh channels add` with a token. Adding one decodes past traffic too, and discovery finds more. |
 | Your own traffic | **Via a companion radio attached to truffles** (§4.6), not by extracting private keys. |
 | Sender identity | By display name (the only thing the protocol carries), with a best-effort link to node pubkeys from adverts, shown as a hint. |
 | Alerts | v1 = active filters highlighted in live traffic (TUI). ntfy and other sinks come later. |
@@ -38,7 +39,7 @@ Source: `../mqtt_observer/meshcore_packets.jsonl`, 9,193 lines, 02:54–21:24 UT
 | Mix | GRP_TXT 2292, ANON_REQ 1815, ADVERT 1412, REQ 1170, RESPONSE 795, PATH 718, TXT_MSG 549, ACK 43, CONTROL 42, GRP_DATA 16, TRACE 1 |
 | Path hash size | varies per packet: 1-byte 2214, 2-byte 4107, 3-byte 2553 — parser must honor `path_len` bits 6–7 |
 | Channel decode | 13 configured channels + public → 875 of 2292 GRP_TXT decrypt (426 unique msgs); **62% undecrypted** |
-| Unknown channels | 89 distinct channel-hash bytes; `0x81` alone = 606 packets (likely a private-key channel) |
+| Unknown channels | 89 distinct channel-hash bytes; `0x81` alone = 606 packets. **Identified in phase 3:** `0x81` is `#wardriving`, a hashtag mentioned in decoded messages. |
 | Back-decode test | guessing ~90 common hashtag names unlocked 6 more channels (`#chattanooga`, `#tn-east`, `#georgia`, `#bna-test`, `#bots`, `#testing`) from stored raw |
 | Sender names | 145 distinct names in decrypted channel text |
 
@@ -71,20 +72,21 @@ Source: `../mqtt_observer/meshcore_packets.jsonl`, 9,193 lines, 02:54–21:24 UT
 ```
 
 Principles:
-1. **Raw first, decode second.** Every MQTT message is kept verbatim. Decoded tables can always be rebuilt (`ferromesh rebuild`).
+1. **Raw first, decode second.** Every MQTT message is kept verbatim. Decoded tables can always be rebuilt (`ferromeshd rebuild`).
 2. **Clients never touch the DB.** Everything goes through the server API, so clients work from any LAN machine.
 3. **One filter model, two evaluators.** The same filter compiles to SQL (history) and an in-memory predicate (live). This gives backfill-then-live and alerts from one piece of code.
 4. **Multi-source from day one.** A source is anything that yields observations: an MQTT broker, and later the companion's RX log. Adding NashMesh is a config entry, not a redesign.
+5. **One writer.** Every database change, MQTT ingest or channel add, goes through the writer thread in order, so row ids follow commit order and streams see each change once.
 
 ### Cargo workspace
 
 | Crate | Role | Key deps |
 |---|---|---|
-| `meshcore-proto` | Pure, no I/O. Header/transport/path/payload parse, packet hash, advert parse + Ed25519 verify, GRP_TXT/GRP_DATA decrypt | `aes`, `hmac`, `sha2`, `ed25519-dalek` |
-| `ferromesh-model` | Shared types: events, filter AST + parser, API/WS wire protocol | `serde`, `chrono` |
-| `ferromesh-store` | Schema, migrations, single writer thread, filter → SQL | `rusqlite` (bundled, FTS5) |
-| `ferromeshd` | Sources (MQTT, later companion), raw log, decode pipeline, broadcast hub, axum API, watch engine. Admin subcommands `import`, `rebuild` and `stats` work on the data directory directly | `tokio`, `rumqttc`, `zstd`, `jiff`, `axum`, `tracing`; later `meshcore-rs` |
-| `ferromesh` (client) | `tui`, `tail`, `query`, `channels`, `watches`, later `send` | `ratatui`, `crossterm`, `tokio-tungstenite`, `clap` |
+| `meshcore-proto` | Pure, no I/O. Header/transport/path/payload parse, packet hash, advert parse + Ed25519 verify, GRP_TXT/GRP_DATA encrypt and decrypt | `aes`, `hmac`, `sha2`, `ed25519-dalek` |
+| `ferromesh-model` | Shared types: events, filter AST + parser, channel types, API/WS wire protocol | `serde`, `jiff` |
+| `ferromesh-store` | Schema, migrations, ingest, queries, filter → SQL, channel backfill and guessing | `rusqlite` (bundled, FTS5) |
+| `ferromeshd` | Sources (MQTT, later companion), raw log, writer thread, broadcast hub, axum API, later watch engine. Admin subcommands `import`, `rebuild` and `stats` work on the data directory directly | `tokio`, `rumqttc`, `zstd`, `jiff`, `axum`, `tracing`; later `meshcore-rs` |
+| `ferromesh` (client) | Built: `tail`, `query`, `channels`. Later: `tui`, `watches`, `send` | `clap`, `reqwest`, `tokio-tungstenite`, `owo-colors`; later `ratatui`, `crossterm` |
 
 External crates evaluated:
 - `MeshCore` 0.0.1 (packet parsing, Nov 2025): self-described "very early, API in flux", 11% documented. **Write our own `meshcore-proto`** and use `michaelhart/meshcore-decoder` plus our Python decoder as test oracles.
@@ -94,6 +96,7 @@ External crates evaluated:
 - Multi-stage Dockerfile (rust builder → debian-slim/distroless) and a compose service with a `./data` volume (db + raw log) and a TOML config.
 - `network_mode: host`, so the container reaches the broker without depending on `.local` mDNS inside Docker and can advertise itself on mDNS for clients. Alternative: if mosquitto is itself a compose service, join its network and use the service name.
 - meshcoretomqtt publishes at **QoS 0 with no retain**, so the broker never queues for ferromeshd: anything published while it's down is gone. Keep restarts short (`restart: unless-stopped`) and backfill gaps with `ferromeshd import` from another capture if needed. Imported copies of messages already stored count as duplicates.
+- Changes through the API need `[api] token` in the server config (at least 16 characters); clients send it as `--token` or `FERROMESH_TOKEN`. Without a token the API is read-only.
 - Phase 5: pass the companion's USB device into the container (`devices: /dev/serial/by-id/...`), or point it at a WiFi companion's `host:5000`.
 - Clients: release binaries for macOS arm64 and Linux amd64 (and `cargo install` for development).
 
@@ -113,6 +116,7 @@ Workload: ~11.5k small rows/day (maybe 10–50× if NashMesh-wide later), a sing
 | Tantivy | Real full-text engine | Only if FTS5 falls short |
 
 ### Schema sketch (SQLite)
+The built schema is in `crates/ferromesh-store/src/schema.rs`; rows marked "phase 5" and later are still plans.
 ```
 sources        (id, kind{mqtt,companion}, name, config)
 observers      (id, pubkey UNIQUE, name, iata, source_id, first_seen, last_seen)
@@ -120,7 +124,7 @@ observer_status(observer_id, ts, battery_mv, noise_floor, uptime_s, tx_air_s, rx
 packets        (id, hash BLOB(8) UNIQUE, first_seen, payload_type, route_type, payload BLOB,
                 chan_hash INT NULL, dst_hash INT NULL, src_hash INT NULL, decode_state)
 observations   (id, packet_id, observer_id, rx_ts, snr, rssi, score, hash_size, hops, path BLOB, transport BLOB NULL)
-channels       (id, name, secret BLOB, hash INT, kind{public,hashtag,key,discovered}, enabled, added_at)
+channels       (id, name, secret BLOB, hash INT, kind{public,hashtag,key}, enabled, added_at)
 messages       (id, packet_id NULL UNIQUE, channel_id NULL, dm_contact NULL, direction{rx,tx}, sender_ts,
                 txt_type, sender_name, body, first_seen, delivery{sent,acked,failed} NULL)
 messages_fts   FTS5(sender_name, body)
@@ -156,8 +160,12 @@ observer:Tanyard  snr>-5  rssi<-100  hops>10     observations
 The same filter compiles to SQL for history and runs in memory for live events. Case folding is ASCII-only on both sides, and a store test checks they select identical rows. Time windows are `--since`/`--until` flags and API parameters, not filter terms. Not yet built: regex text search, `role:`, and `dm:me` (phase 5).
 
 ### 4.4 Channels, back-decode, discovery
-- `ferromesh channels add '#name' | --key <b64>` (TUI too) stores the channel and starts a backfill job: undecrypted GRP_TXT/GRP_DATA with a matching hash → HMAC check → decrypt → `messages`, streamed as progress.
-- Discovery lists unknown channel hashes by volume and first/last seen, and runs a guessing job over a wordlist that includes hashtags seen mentioned in decoded text, node names, and TN/regional place names. Hits are marked `discovered` so you can review and keep them.
+*Built in phase 3.*
+- **Adding.** `ferromesh channels add '#name'` (or `'Name' --key <b64>`) posts to `/api/v1/channels` with the token. The writer thread stores the channel, then tries its key on stored undecrypted packets with its hash, 1,000 per transaction. Decrypted GRP_TXT become messages, which also go out on live streams. Channels in the server config are added and backfilled the same way at startup. Without a key, a name must start with `#`.
+- **Same result as having it all along.** Back-decoded messages take the packet's first-seen time, so backfilling gives the same database digest as having had the channel from the start (store test, and a live `rebuild` check).
+- **Discovery.** `ferromesh channels unknown` lists channel hashes on undecrypted traffic, busiest first, noting any known channel sharing the hash byte.
+- **Guessing.** `ferromesh channels guess [names]` tries names you pass, hashtags mentioned in recent decoded messages, and a built-in list of common and US-state names. A name counts only if its key passes the MAC and decrypts at least one packet to readable text, because the two-byte MAC lets a wrong key through about once in 65,536 packets. `--add` adds every hit. There is no separate `discovered` kind: hits are either added, or not.
+- **Not built:** removing or disabling a channel (the `enabled` column exists), and guessing from node names or place names beyond the built-in list.
 
 ### 4.5 Watches (v1 = active filter)
 A watch is a saved filter with a colour and a bell, evaluated inline in the pipeline. The TUI highlights matches in any view and keeps an "alerts" pane. Sinks (ntfy etc.) are a later phase that plugs into the same watch record.
@@ -180,7 +188,7 @@ Things to verify in phase 5: whether the companion can also stay paired to your 
 | 0 ✅ | Workspace + `meshcore-proto` + golden tests from the capture (done 2026-09-12; fixture via `tools/gen_fixture.py`) | All 8,853 packets parse. Computed payload len = MQTT `payload_len` and computed hash = MQTT `hash`. Python results reproduced (426 unique msgs, 1,412 adverts). Advert signatures verify |
 | 1 🟡 | `ferromesh-store` + `ferromeshd` MQTT source + raw log + `import` of old capture + **Docker image & compose on truffles**. Code done 2026-09-13 and tested live from the Mac (serve, import, rebuild with matching digest). Truffles deploy and the 24h run are pending. | Runs 24h on truffles with no loss; `rebuild` from raw gives an identical DB |
 | 2 ✅ | API: REST query + WS stream (backfill→live); `ferromesh tail` / `query`. Done 2026-09-13: integration tests cover resume, filters and lag catch-up. A live run across a forced server restart delivered 57 consecutive observation ids, matching the database exactly. | `tail chan:#test --last 50` shows history then live, with no gap or dupe across a forced reconnect |
-| 3 | Dynamic channels + back-decode + discovery (CLI) | `channels add '#chattanooga'` backfills its 37 packets; discovery lists `0x81` etc. |
+| 3 ✅ | Dynamic channels + back-decode + discovery (CLI). Done 2026-09-13 on the Mac's copy of the imported capture. `channels add '#chattanooga'` decrypted 32 of 56 waiting packets and `#tn-east` 27, both matching an independent Python HMAC count. (The plan's "37" counted relayed copies in a different window.) `unknown` listed `81` first, `guess` identified it as `#wardriving` (651 packets), and a rebuild matched the backfilled database's digest. | `channels add '#chattanooga'` backfills its packets; discovery lists `0x81` etc. |
 | 4 | **TUI**: channels, feed, RF view, nodes, packet inspector, filter bar, watches-as-highlights | Usable from a Mac and a Linux box on the LAN |
 | 5 | Companion source + send: own DMs, contacts, send channel/DM from TUI with ACK status | Send to `#test` from the TUI and see it echoed back via the repeater's MQTT feed |
 | 6 | Web UI (stack TBD) | Live feed + chat + search + nodes |
@@ -191,7 +199,7 @@ Things to verify in phase 5: whether the companion can also stay paired to your 
 **Answered**, see §0: host, scope, dynamic channels, own DMs (via companion), identity, alerts timing, web deferral, send direction.
 
 **Accepted proposals** (2026-09-12)
-- LAN access: reads are open; writes (send, channel keys) require a token in the client config.
+- LAN access: reads are open; changes (channel keys now, sending later) need the server's `api.token`, which clients send as `--token` or `FERROMESH_TOKEN`.
 - Retention: keep everything (raw + decoded), ~1 GB/yr.
 - Ordering: observer receive time, with the sender timestamp shown as secondary.
 - Display: each message once with a "heard ×N via paths" badge; every reception appears in the RF view.
