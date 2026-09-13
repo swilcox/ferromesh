@@ -16,7 +16,8 @@ use crate::render::{self, Printer};
 /// The server pings every 30s, so this much silence means a dead connection.
 const SILENCE_LIMIT: Duration = Duration::from_secs(75);
 const RETRY_MIN: Duration = Duration::from_secs(1);
-const RETRY_MAX: Duration = Duration::from_secs(30);
+/// Short, because the server is normally on the LAN and back within seconds.
+const RETRY_MAX: Duration = Duration::from_secs(5);
 
 pub struct Server {
     base: String,
