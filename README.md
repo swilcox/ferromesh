@@ -56,7 +56,7 @@ ferromesh query --kind packets type:advert --json
 
 `tail` reconnects by itself and resumes after the last event it printed, so a dropped connection or a server restart doesn't lose or repeat anything the server stored.
 
-Filters are space-separated terms that must all match: `chan:#test,#wx`, `from:BNA*`, a bare word to search message text, `type:advert`, `node:4d1727`, `observer:Tanyard`, and `'snr>-5'`, `'rssi<-100'` or `'hops>2'` for observations. A leading `-` negates a term. Quote terms that contain spaces, `>` or `<`.
+Filters are space-separated terms that must all match: `chan:#test,#wx`, `from:BNA*`, a bare word to search message text, `type:advert`, `node:4d1727`, `observer:Tanyard`, and `'snr>-5'`, `'rssi<-100'` or `'hops>2'` for observations. A leading `-` negates a term. Quote `>` and `<` so the shell leaves them alone, and put double quotes around values with spaces: `'from:"BNA Bot"'`. One quoted argument can hold a whole filter: `'type:advert snr>-5'`.
 
 The API itself is small: `GET /api/v1/{messages,packets,observations}?filter=&limit=&since=&until=` returns history, and a WebSocket at `/api/v1/stream?kind=&filter=&last=` sends history and then live events. See `crates/ferromesh-model/src/wire.rs`.
 

@@ -21,7 +21,9 @@ Filters are space-separated terms that must all match:
   storm            words in the message     text:\"storm warning\"
   type:advert      packet type              node:4d1727      advert public key prefix
   observer:Tanyard observer name            'snr>-5' 'rssi<-100' 'hops>2'
-A leading - negates a term. Quote anything with spaces, > or <.";
+A leading - negates a term. Quote > and < from the shell, and put double quotes
+around values with spaces: 'from:\"BNA Bot\"'. One quoted argument can hold a
+whole filter: 'type:advert snr>-5'.";
 
 #[derive(Parser)]
 #[command(version, about, after_help = FILTER_HELP)]
@@ -119,53 +121,39 @@ async fn run(cli: Cli) -> Result<()> {
     }
 }
 
-/// Joins the filter arguments into one filter, re-quoting values the shell
-/// unquoted, and checks it before contacting the server.
+/// Joins the filter arguments into one filter and checks it before contacting
+/// the server. An argument may hold one term or several; values with spaces
+/// need their own double quotes, since the shell's quotes are already gone.
 fn filter_text(args: &[String], kind: Kind) -> Result<Option<String>> {
-    let text = args.iter().map(|arg| requote(arg)).collect::<Vec<_>>().join(" ");
+    let text = args.join(" ");
     let filter: Filter = text.parse()?;
     filter.validate(kind)?;
     Ok((!filter.is_empty()).then_some(text))
-}
-
-/// `from:BNA Bot` (the shell ate the quotes) becomes `from:"BNA Bot"`.
-fn requote(arg: &str) -> String {
-    if !arg.contains(char::is_whitespace) || arg.contains('"') {
-        return arg.to_owned();
-    }
-    match arg.split_once(':') {
-        Some((key, value))
-            if !key.trim_start_matches('-').is_empty()
-                && key.trim_start_matches('-').chars().all(|c| c.is_ascii_alphabetic()) =>
-        {
-            format!("{key}:\"{value}\"")
-        }
-        _ => format!("\"{arg}\""),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn requotes_shell_split_values() {
-        assert_eq!(requote("from:BNA Bot"), r#"from:"BNA Bot""#);
-        assert_eq!(requote("-from:BNA Bot"), r#"-from:"BNA Bot""#);
-        assert_eq!(requote("storm warning"), r#""storm warning""#);
-        assert_eq!(requote("chan:#test"), "chan:#test");
-        assert_eq!(requote(r#"from:"BNA Bot""#), r#"from:"BNA Bot""#);
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_owned()).collect()
     }
 
     #[test]
-    fn filter_arguments_are_checked_locally() {
-        let args = |words: &[&str]| words.iter().map(|w| (*w).to_owned()).collect::<Vec<_>>();
+    fn filter_arguments_join_and_are_checked_locally() {
         assert_eq!(
-            filter_text(&args(&["chan:#test", "from:BNA Bot"]), Kind::Messages).unwrap(),
+            filter_text(&args(&["chan:#test", r#"from:"BNA Bot""#]), Kind::Messages).unwrap(),
             Some(r#"chan:#test from:"BNA Bot""#.to_owned())
         );
         assert_eq!(filter_text(&[], Kind::Messages).unwrap(), None);
         assert!(filter_text(&args(&["snr>1"]), Kind::Messages).is_err());
         assert!(filter_text(&args(&["colour:red"]), Kind::Packets).is_err());
+    }
+
+    #[test]
+    fn one_argument_can_hold_several_terms() {
+        let text = filter_text(&args(&["type:advert snr>-5"]), Kind::Observations).unwrap();
+        let filter: Filter = text.unwrap().parse().unwrap();
+        assert_eq!(filter.terms().len(), 2);
     }
 }
