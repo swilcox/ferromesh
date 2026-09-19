@@ -52,6 +52,19 @@ ferromeshd then records every packet the radio hears as observations beside your
 
 The radio holds a few hundred contacts, and a busy mesh has more nodes than that, most of them repeaters, which don't need to be contacts. So ferromeshd sets the radio to add only chat radios as it hears them, replacing the contact it heard from least recently once full. Favourites are never replaced: everyone you exchange direct messages with becomes one, and `ferromesh contacts pin NAME` makes any other node one (a repeater you administer, a room server). If a direct message arrives that the radio can't read because it has never heard, or has forgotten, the sender, ferromeshd adds the possible senders from everything it has recorded, so the sender's automatic retry can be read. `ferromesh contacts` lists what's on the radio.
 
+In Docker, pass the radio into the container with a `compose.override.yaml` beside `compose.yaml` (Compose merges it automatically), and set `device = "/dev/companion"`:
+
+```yaml
+services:
+  ferromeshd:
+    devices:
+      - /dev/ttyACM0:/dev/companion   # the radio's port on the host
+    group_add:
+      - "20"                          # the host's dialout group, which owns the port
+```
+
+A replugged radio can come back as a different `ttyACM` device; update the path and run `docker compose up -d`.
+
 ## Watching traffic
 
 The client only talks to the API, so it works from any machine that can reach the server:
