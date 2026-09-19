@@ -20,6 +20,16 @@ pub struct Config {
     pub api: ApiConfig,
     #[serde(default, rename = "channel")]
     pub channels: Vec<ChannelConfig>,
+    /// A companion radio to record from; none without this section.
+    pub companion: Option<CompanionConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompanionConfig {
+    /// The radio's serial port, or `auto` for the one Espressif USB device.
+    #[serde(default = "default_device")]
+    pub device: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,8 +69,8 @@ impl Default for ApiConfig {
 pub struct ChannelConfig {
     /// `#name` for a hashtag channel; any name for a channel with a `key`.
     pub name: String,
-    /// Base64 secret for a private channel; hashtag channels derive theirs
-    /// from the name.
+    /// A private channel's secret, in hex or base64; hashtag channels derive
+    /// theirs from the name.
     pub key: Option<String>,
 }
 
@@ -103,6 +113,10 @@ fn default_topics() -> Vec<String> {
     vec!["meshcore/+/+/packets".to_owned(), "meshcore/+/+/status".to_owned()]
 }
 
+fn default_device() -> String {
+    "auto".to_owned()
+}
+
 fn default_listen() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], DEFAULT_PORT))
 }
@@ -129,6 +143,15 @@ mod tests {
         let config = Config::parse(MINIMAL).unwrap();
         assert_eq!(config.api.listen, default_listen());
         assert_eq!(config.api.token, None);
+    }
+
+    #[test]
+    fn companion_section() {
+        assert!(Config::parse(MINIMAL).unwrap().companion.is_none());
+        let auto = Config::parse(&format!("{MINIMAL}[companion]\n")).unwrap();
+        assert_eq!(auto.companion.unwrap().device, "auto");
+        let path = Config::parse(&format!("{MINIMAL}[companion]\ndevice = \"/dev/ttyACM0\"\n"));
+        assert_eq!(path.unwrap().companion.unwrap().device, "/dev/ttyACM0");
     }
 
     #[test]

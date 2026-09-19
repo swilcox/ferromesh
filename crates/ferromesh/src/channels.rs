@@ -124,12 +124,12 @@ pub async fn guess(
     Ok(())
 }
 
-fn local(at: Timestamp) -> String {
+pub(crate) fn local(at: Timestamp) -> String {
     at.to_zoned(TimeZone::system()).strftime("%Y-%m-%d %H:%M").to_string()
 }
 
 /// Columns padded to their widest cell; those listed in `right` align right.
-fn table(header: &[&str], rows: &[Vec<String>], right: &[usize]) -> String {
+pub(crate) fn table(header: &[&str], rows: &[Vec<String>], right: &[usize]) -> String {
     let rows: Vec<Vec<&str>> = std::iter::once(header.to_vec())
         .chain(rows.iter().map(|row| row.iter().map(String::as_str).collect()))
         .collect();
@@ -156,14 +156,14 @@ fn table(header: &[&str], rows: &[Vec<String>], right: &[usize]) -> String {
     out
 }
 
-fn print(text: &str) -> Result<()> {
+pub(crate) fn print(text: &str) -> Result<()> {
     let mut out = io::stdout().lock();
     out.write_all(text.as_bytes())?;
     out.flush()?;
     Ok(())
 }
 
-fn json_lines<T: Serialize>(items: &[T]) -> Result<()> {
+pub(crate) fn json_lines<T: Serialize>(items: &[T]) -> Result<()> {
     let mut out = io::stdout().lock();
     for item in items {
         writeln!(out, "{}", serde_json::to_string(item)?)?;

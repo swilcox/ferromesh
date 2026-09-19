@@ -29,6 +29,8 @@ ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rumqttc = { version = "0.25", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }
+# Without libudev, so the container build needs no system libraries.
+serialport = { version = "4.10", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"

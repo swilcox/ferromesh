@@ -60,6 +60,25 @@ pub struct StatusReport {
     pub raw: String,
 }
 
+/// A direct message a companion radio decrypted and handed over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DirectMessage {
+    /// The companion radio it was sent to.
+    pub observer: ObserverInfo,
+    /// When ferromesh fetched it from the radio.
+    pub received_at: Micros,
+    /// The first 6 bytes of the sender's key.
+    pub sender_prefix: [u8; 6],
+    /// Hops it travelled, or `None` if it came by a direct route.
+    pub path_len: Option<u8>,
+    pub txt_type: u8,
+    pub sender_timestamp: u32,
+    /// For signed room-server posts, the author's 4-byte key prefix.
+    pub signer_prefix: Option<[u8; 4]>,
+    pub snr: Option<f64>,
+    pub body: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// A new observation; `new_packet` is false if another copy was stored first.
@@ -189,6 +208,63 @@ impl<'a> Batch<'a> {
                 report.raw,
             ])?;
         Ok(inserted > 0)
+    }
+
+    /// Returns false if this message was already stored. A repeat heard
+    /// earlier than the stored copy replaces its reception details, so the
+    /// result doesn't depend on replay order.
+    pub fn record_direct_message(&mut self, message: &DirectMessage) -> Result<bool> {
+        let observer_id = self.upsert_observer(&message.observer, message.received_at)?;
+        let key = params![
+            observer_id,
+            message.sender_prefix,
+            message.sender_timestamp,
+            message.txt_type,
+            message.body,
+        ];
+        let stored: Option<(i64, Micros)> = self
+            .tx
+            .prepare_cached(
+                "SELECT id, received_at FROM direct_messages
+                 WHERE observer_id = ?1 AND sender_prefix = ?2 AND sender_timestamp = ?3
+                   AND txt_type = ?4 AND body = ?5",
+            )?
+            .query_row(key, |row| Ok((row.get(0)?, row.get(1)?)))
+            .optional()?;
+        match stored {
+            Some((id, received_at)) => {
+                if message.received_at < received_at {
+                    self.tx
+                        .prepare_cached(
+                            "UPDATE direct_messages SET received_at = ?2, path_len = ?3, snr = ?4
+                             WHERE id = ?1",
+                        )?
+                        .execute(params![id, message.received_at, message.path_len, message.snr])?;
+                }
+                Ok(false)
+            }
+            None => {
+                self.tx
+                    .prepare_cached(
+                        "INSERT INTO direct_messages (observer_id, received_at, sender_prefix,
+                                                      path_len, txt_type, sender_timestamp,
+                                                      signer_prefix, snr, body)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    )?
+                    .execute(params![
+                        observer_id,
+                        message.received_at,
+                        message.sender_prefix,
+                        message.path_len,
+                        message.txt_type,
+                        message.sender_timestamp,
+                        message.signer_prefix,
+                        message.snr,
+                        message.body,
+                    ])?;
+                Ok(true)
+            }
+        }
     }
 
     /// Tries `key` on up to `limit` undecrypted packets carrying its hash,

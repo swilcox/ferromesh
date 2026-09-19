@@ -1,6 +1,6 @@
-//! Node listings and single-packet detail.
+//! Node listings, single-packet detail and direct messages.
 
-use ferromesh_model::{Event, Kind, NodeInfo, PacketDetail, PacketReception};
+use ferromesh_model::{DirectMessageInfo, Event, Kind, NodeInfo, PacketDetail, PacketReception};
 use jiff::Timestamp;
 use meshcore_proto::NodeRole;
 use rusqlite::types::Type;
@@ -75,6 +75,40 @@ pub(crate) fn packet_detail(conn: &Connection, hash: &[u8]) -> Result<Option<Pac
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(Some(PacketDetail { packet, receptions }))
+}
+
+/// Direct messages, newest first. A sender is named only when exactly one
+/// known node has its key prefix.
+pub(crate) fn direct_messages(conn: &Connection, limit: usize) -> Result<Vec<DirectMessageInfo>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT d.id, d.received_at, coalesce(o.name, lower(hex(o.pubkey))), d.sender_prefix,
+                (SELECT CASE WHEN count(*) = 1 THEN max(n.name) END
+                 FROM nodes n WHERE substr(n.pubkey, 1, 6) = d.sender_prefix),
+                d.path_len, d.txt_type, d.sender_timestamp, d.snr, d.body
+         FROM direct_messages d JOIN observers o ON o.id = d.observer_id
+         ORDER BY d.received_at DESC, d.id DESC
+         LIMIT ?1",
+    )?;
+    let messages = stmt
+        .query_map([limit as i64], |row| {
+            let sent: i64 = row.get(7)?;
+            Ok(DirectMessageInfo {
+                id: row.get(0)?,
+                received_at: timestamp(row, 1)?,
+                to: row.get(2)?,
+                sender: row.get(4)?,
+                sender_prefix: hex::encode(row.get::<_, Vec<u8>>(3)?),
+                hops: row.get(5)?,
+                txt_type: row.get(6)?,
+                sender_timestamp: Timestamp::from_second(sent).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(7, Type::Integer, Box::new(e))
+                })?,
+                snr: row.get(8)?,
+                body: row.get(9)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(messages)
 }
 
 fn timestamp(row: &Row<'_>, index: usize) -> rusqlite::Result<Timestamp> {

@@ -10,11 +10,11 @@ A MeshCore repeater running observer firmware (or [meshcoretomqtt](https://githu
 
 | Path | What |
 |---|---|
-| `crates/meshcore-proto` | Packet parsing, hashing, advert signature checks, channel encryption and decryption. No I/O. |
+| `crates/meshcore-proto` | Packet parsing, hashing, advert signature checks, channel encryption and decryption, and the companion radio protocol. No I/O. |
 | `crates/ferromesh-model` | Events, the filter language, and the API's wire format, shared by server and clients. |
 | `crates/ferromesh-store` | SQLite schema, ingest, queries and channel backfill. |
-| `crates/ferromeshd` | The server: MQTT ingest, raw log, HTTP/WebSocket API, and `import`, `rebuild`, `stats` commands. |
-| `crates/ferromesh` | The client: `tail`, `query`, `channels` and the `tui` terminal UI. |
+| `crates/ferromeshd` | The server: MQTT and companion-radio ingest, raw log, HTTP/WebSocket API, and `import`, `rebuild`, `stats` commands. |
+| `crates/ferromesh` | The client: `tail`, `query`, `channels`, `dms` and the `tui` terminal UI. |
 | `tools/gen_fixture.py` | Builds the golden-test fixture from a capture. |
 
 ## Running the server
@@ -39,6 +39,17 @@ Every MQTT message is appended to `data/raw/` before it reaches the database, so
 - `ferromeshd rebuild [--replace]` rebuilds the database from the raw log and checks it matches.
 - `ferromeshd stats` prints row counts.
 
+### A companion radio
+
+A second radio, flashed with MeshCore's stock **companion** firmware and plugged in by USB, adds your own vantage point and your own messages. Add to the config:
+
+```toml
+[companion]
+device = "auto"   # the one Espressif USB device, or a path such as /dev/serial/by-id/usb-Espressif_...
+```
+
+ferromeshd then records every packet the radio hears as observations beside your MQTT observers', stores direct messages sent to it (the radio decrypts them; its private key never leaves it), and logs its battery, noise floor and packet counts every 5 minutes. It warns if the radio stops hearing anything, and reconnects if it's unplugged. ferromeshd must be the radio's only client: don't pair a phone with it too, because whichever client fetches a queued message takes it. So far ferromeshd only listens; sending is next.
+
 ## Watching traffic
 
 The client only talks to the API, so it works from any machine that can reach the server:
@@ -52,6 +63,7 @@ ferromesh tail chan:#test --last 50
 ferromesh tail --kind observations 'snr>-5'   # every reception, with signal and path
 ferromesh query from:BNA* --since 6h
 ferromesh query --kind packets type:advert --json
+ferromesh dms                                 # direct messages to your companion radio
 ```
 
 `tail` reconnects by itself and resumes after the last event it printed, so a dropped connection or a server restart doesn't lose or repeat anything the server stored.
@@ -100,6 +112,7 @@ Hashtag channels derive their key from the name, which is why guessing works; pr
 - `GET /api/v1/channels`, `GET /api/v1/channels/unknown`, `POST /api/v1/channels/guess`, and `POST /api/v1/channels` (with `Authorization: Bearer <token>`) manage channels.
 - `GET /api/v1/nodes?limit=` lists nodes, most recently heard first.
 - `GET /api/v1/packets/{hash}` returns one packet with every reception's raw frame.
+- `GET /api/v1/direct?limit=` returns direct messages to your companion radio, newest first.
 
 See `crates/ferromesh-model/src/wire.rs`.
 

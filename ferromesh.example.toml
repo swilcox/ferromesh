@@ -23,6 +23,15 @@ listen = "0.0.0.0:7373"
 # Generate one with: openssl rand -hex 24
 # token = "..."
 
+# A companion radio (stock MeshCore companion firmware, USB) to record from.
+# Every packet it hears is stored as an observation beside the MQTT observers',
+# and direct messages sent to it are stored too. ferromeshd must be its only
+# client. `auto` finds the one Espressif USB device; otherwise give its port,
+# e.g. /dev/serial/by-id/usb-Espressif_... or /dev/cu.usbmodem2101.
+#
+# [companion]
+# device = "auto"
+
 # Channels to decrypt. The public channel is always included.
 # Hashtag channels need only their name. Private channels also need their key,
 # in hex (as in MeshCore QR codes) or base64:

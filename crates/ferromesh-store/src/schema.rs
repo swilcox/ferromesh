@@ -4,7 +4,8 @@ use crate::{Error, Result};
 
 /// Each entry moves the schema up one version; `PRAGMA user_version` records
 /// how many have run. Append new migrations, never edit old ones.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 -- Timestamps (*_at) are INTEGER microseconds since the Unix epoch, UTC.
 
 CREATE TABLE observers (
@@ -150,7 +151,27 @@ CREATE TRIGGER messages_fts_update AFTER UPDATE OF sender, body ON messages BEGI
     VALUES ('delete', old.id, old.sender, old.body);
     INSERT INTO messages_fts (rowid, sender, body) VALUES (new.id, new.sender, new.body);
 END;
-"#];
+"#,
+    r#"
+-- Direct messages a companion radio decrypted and handed over. The sender is
+-- known only by the first 6 bytes of its key. A message heard again keeps its
+-- earliest copy. path_len is NULL when it came by a direct route.
+CREATE TABLE direct_messages (
+    id               INTEGER PRIMARY KEY,
+    observer_id      INTEGER NOT NULL REFERENCES observers (id),
+    received_at      INTEGER NOT NULL,
+    sender_prefix    BLOB NOT NULL,
+    path_len         INTEGER,
+    txt_type         INTEGER NOT NULL,
+    sender_timestamp INTEGER NOT NULL,
+    signer_prefix    BLOB,
+    snr              REAL,
+    body             TEXT NOT NULL,
+    UNIQUE (observer_id, sender_prefix, sender_timestamp, txt_type, body)
+);
+CREATE INDEX direct_messages_by_time ON direct_messages (received_at);
+"#,
+];
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {
     let found: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;

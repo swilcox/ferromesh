@@ -16,6 +16,9 @@
 //!   heard first.
 //! - `GET /api/v1/packets/{hash}` returns a [`PacketDetail`](crate::PacketDetail)
 //!   with every reception's frame.
+//! - `GET /api/v1/direct?limit=` returns
+//!   [`DirectMessageInfo`](crate::DirectMessageInfo)s sent to your companion
+//!   radio, newest first.
 //!
 //! Errors are JSON `{"error": "..."}` with a matching HTTP status.
 

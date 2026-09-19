@@ -62,6 +62,10 @@ impl Reader {
     pub fn packet_detail(&self, hash: &[u8]) -> Result<Option<ferromesh_model::PacketDetail>> {
         crate::detail::packet_detail(&self.conn, hash)
     }
+
+    pub fn direct_messages(&self, limit: usize) -> Result<Vec<ferromesh_model::DirectMessageInfo>> {
+        crate::detail::direct_messages(&self.conn, limit)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

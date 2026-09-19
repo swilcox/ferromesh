@@ -1,4 +1,5 @@
-//! `ferromeshd serve`: subscribe to MQTT, feed the writer, and serve the API.
+//! `ferromeshd serve`: subscribe to MQTT, read the companion radio if there is
+//! one, feed the writer, and serve the API.
 
 use std::time::Duration;
 
@@ -11,6 +12,7 @@ use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{info, warn};
 
 use crate::api::{self, AppState};
+use crate::companion::Companion;
 use crate::config::Config;
 use crate::pipeline;
 use crate::rawlog::{RawLogWriter, RawRecord};
@@ -41,9 +43,18 @@ pub async fn run(config: Config) -> Result<()> {
         .name("writer".into())
         .spawn(move || writer::run(store, raw, queue, events))?;
 
+    let companion = config
+        .companion
+        .clone()
+        .map(|companion| Companion::spawn(companion, jobs.clone()))
+        .transpose()?;
+
     let subscribed = subscribe(&config, jobs).await;
-    // Stopping the API releases its handle on the writer, which then drains
-    // what's queued and stops.
+    // Stopping the companion and then the API releases their handles on the
+    // writer, which then drains what's queued and stops.
+    if let Some(companion) = companion {
+        tokio::task::spawn_blocking(move || companion.stop()).await?;
+    }
     let _ = stop.send(true);
     let served = api.await.map_err(|_| anyhow!("API task panicked"))?.context("API server");
     let written = writer.join().map_err(|_| anyhow!("writer thread panicked"))?;

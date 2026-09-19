@@ -8,13 +8,7 @@ use ferromesh_store::{Micros, ObserverInfo, Reception, StatusReport};
 use jiff::Timestamp;
 use serde_json::{Map, Value};
 
-#[derive(Debug)]
-pub enum Message {
-    Packet(Reception),
-    Status(StatusReport),
-    /// A topic we don't store, such as `debug`.
-    Ignored,
-}
+use crate::source::Message;
 
 pub fn parse(topic: &str, payload: &str) -> Result<Message> {
     let parts: Vec<&str> = topic.split('/').collect();
@@ -47,15 +41,26 @@ pub fn parse(topic: &str, payload: &str) -> Result<Message> {
         }));
     }
 
+    Ok(Message::Status(status_report(observer, at, &fields, payload)))
+}
+
+/// A status report from its JSON fields. Companion radios' reports use the
+/// same fields.
+pub(crate) fn status_report(
+    observer: ObserverInfo,
+    at: Micros,
+    fields: &Map<String, Value>,
+    payload: &str,
+) -> StatusReport {
     let no_stats = Map::new();
     let stats = fields.get("stats").and_then(Value::as_object).unwrap_or(&no_stats);
-    Ok(Message::Status(StatusReport {
+    StatusReport {
         observer,
         at,
-        status: text(&fields, "status"),
-        model: text(&fields, "model"),
-        firmware_version: text(&fields, "firmware_version"),
-        radio: text(&fields, "radio"),
+        status: text(fields, "status"),
+        model: text(fields, "model"),
+        firmware_version: text(fields, "firmware_version"),
+        radio: text(fields, "radio"),
         battery_mv: integer(stats, "battery_mv"),
         uptime_secs: integer(stats, "uptime_secs"),
         noise_floor: integer(stats, "noise_floor"),
@@ -66,10 +71,10 @@ pub fn parse(topic: &str, payload: &str) -> Result<Message> {
         recv_errors: integer(stats, "recv_errors"),
         queue_len: integer(stats, "queue_len"),
         raw: payload.to_owned(),
-    }))
+    }
 }
 
-fn observer_key(hex_key: &str) -> Result<[u8; 32]> {
+pub(crate) fn observer_key(hex_key: &str) -> Result<[u8; 32]> {
     let mut key = [0; 32];
     hex::decode_to_slice(hex_key, &mut key)
         .with_context(|| format!("observer key {hex_key:?} is not 32 bytes of hex"))?;
@@ -84,7 +89,7 @@ fn timestamp(fields: &Map<String, Value>) -> Result<Micros> {
         .as_microsecond())
 }
 
-fn text(fields: &Map<String, Value>, key: &str) -> Option<String> {
+pub(crate) fn text(fields: &Map<String, Value>, key: &str) -> Option<String> {
     fields.get(key)?.as_str().map(str::to_owned)
 }
 

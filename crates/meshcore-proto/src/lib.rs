@@ -1,6 +1,7 @@
 //! MeshCore packet parsing, hashing, advert verification and channel decryption.
 //!
-//! Pure and I/O-free. Layouts follow the firmware (`src/Packet.cpp`,
+//! Pure and I/O-free. [`companion`] covers the protocol between an app and a
+//! companion radio. Layouts follow the firmware (`src/Packet.cpp`,
 //! `src/Mesh.cpp`, `src/helpers/BaseChatMesh.cpp`) and `docs/payloads.md`.
 //!
 //! ```
@@ -29,6 +30,7 @@ mod reader;
 
 pub mod advert;
 pub mod channel;
+pub mod companion;
 pub mod error;
 pub mod packet;
 pub mod payload;

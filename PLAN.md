@@ -1,11 +1,13 @@
 # ferromesh — MeshCore MQTT ingest, store, watch, alert
 
-Status (2026-09-13):
+Status (2026-09-19):
 - **Phase 0 complete:** decoder crate plus golden test.
 - **Phase 1 deployed on truffles:** only the 24h no-loss check is pending.
 - **Phase 2 complete:** API, stream, and `ferromesh tail`/`query`, verified live across a forced server restart.
 - **Phase 3 complete:** channels, back-decode and discovery, verified live on real data.
-- **Next:** phase 4 (TUI).
+- **Phase 4 deployed:** the TUI, on truffles since 2026-09-19. An interactive Linux run is pending.
+- **Phase 5a complete:** the companion link, verified on the Mac with the Heltec V4 (`scw`) on USB.
+- **Next:** phase 5b, sending.
 
 Prior art is in `../mqtt_observer`.
 
@@ -18,10 +20,10 @@ Prior art is in `../mqtt_observer`.
 | Data scope | **Your own repeater's local feed first.** It works without internet. NashMesh-wide ingest is an optional later add-on; the design stays multi-source so it slots in cleanly. |
 | Database | **SQLite** (WAL) plus a verbatim raw MQTT log. See §3. |
 | Channels | **Dynamic.** Stored in the DB, seeded from the config's `[[channel]]` list, and added through the API or `ferromesh channels add` with a token. Adding one decodes past traffic too, and discovery finds more. |
-| Your own traffic | **Via a companion radio attached to truffles** (§4.6), not by extracting private keys. |
+| Your own traffic | **Via a companion radio** (§4.6), not by extracting private keys: a Heltec V4 on stock USB companion firmware, owned by ferromeshd. Developed on the Mac, then moved to truffles. |
 | Sender identity | By display name (the only thing the protocol carries), with a best-effort link to node pubkeys from adverts, shown as a hint. |
-| Alerts | v1 = active filters highlighted in live traffic (TUI). ntfy and other sinks come later. |
-| Order | **Data backend → TUI → companion/send → web.** |
+| Alerts | v1 = active filters highlighted in live traffic (TUI). Next sink: Home Assistant (on marbles.local) via MQTT discovery, which reaches your phone; ntfy only if still wanted. |
+| Order | **Data backend → TUI → companion/send → Home Assistant → web.** |
 | Web frontend | **Deferred** (you're deciding). The API stays frontend-agnostic. |
 
 ## 1. What we have today (measured, not assumed)
@@ -179,7 +181,19 @@ The repeater can't originate chat, and the MQTT feed only shows ciphertext for D
 - **Bonus:** its RX log is a second observation source (a second vantage point on the mesh).
 - The repeater stays a repeater. Keep the companion a short distance from it; a companion radio is inexpensive.
 
-Things to verify in phase 5: whether the companion can also stay paired to your phone concurrently (the device has a single message queue, so clients may compete), and whether the Heltec V4 companion build has a WiFi or USB variant or whether USB-serial is the practical route.
+Settled 2026-09-19, from the firmware source (`examples/companion_radio/MyMesh.cpp`):
+- **One client.** Stock companion firmware tracks one connection, and whichever client fetches a waiting message consumes it. So ferromeshd is the radio's only client; the TUI, web and Home Assistant all go through ferromesh's API. Your phone stays off this radio.
+- **Stock USB firmware.** USB is always connected and passes into Docker with a `devices:` line. Sending over MQTT isn't possible with any firmware: MQTT firmwares (OffbandMesh and similar) only publish what they hear. meshcomod's simultaneous USB, BLE and TCP adds nothing when there is a single client.
+- **What the protocol gives us:** `CMD_SEND_TXT_MSG` and `CMD_SEND_CHANNEL_TXT_MSG`; `RESP_CODE_SENT` with the expected ACK and a timeout, then `PUSH_CODE_SEND_CONFIRMED` with the round-trip time; a queue drained with `CMD_SYNC_NEXT_MESSAGE` after `PUSH_CODE_MSG_WAITING`; `PUSH_CODE_LOG_RX_DATA` with every raw packet heard plus SNR and RSSI (only while a client is connected); contacts, channel slots, clock and adverts; repeater login, status and telemetry requests; trace and path discovery; and `CMD_SEND_RAW_PACKET`.
+
+### 4.7 Where ferromesh differs from existing tools
+Capture analyzers such as [CoreScope](https://github.com/Kpa-clawbot/CoreScope) read MQTT and can't send. Companion clients such as [RemoteTerm](https://github.com/jkingsman/Remote-Terminal-for-MeshCore) and [MeshMonitor](https://meshmonitor.org/features/meshcore.html) send, but only know what their own radio heard. ferromesh joins the two:
+1. **Visible delivery.** Each message you send is matched against every observer (Tanyard, the companion, later NashMesh), giving which repeaters carried it, by which paths, at what SNR, and whether the ACK returned. Over time your own sends map your coverage.
+2. **One radio owner, many front ends,** behind one token-protected API and outbox.
+3. **One verbatim archive** of every observer, including your own DMs, rebuildable from the raw log.
+4. **Terminal first,** plus a small Rust binary.
+5. **Network health from your own repeater's view,** fed to Home Assistant.
+Deliberately not chased yet: bots, auto-responders, Meshtastic.
 
 ## 5. Phases
 
@@ -190,13 +204,16 @@ Things to verify in phase 5: whether the companion can also stay paired to your 
 | 2 ✅ | API: REST query + WS stream (backfill→live); `ferromesh tail` / `query`. Done 2026-09-13: integration tests cover resume, filters and lag catch-up. A live run across a forced server restart delivered 57 consecutive observation ids, matching the database exactly. | `tail chan:#test --last 50` shows history then live, with no gap or dupe across a forced reconnect |
 | 3 ✅ | Dynamic channels + back-decode + discovery (CLI). Done 2026-09-13 on the Mac's copy of the imported capture. `channels add '#chattanooga'` decrypted 32 of 56 waiting packets and `#tn-east` 27, both matching an independent Python HMAC count. (The plan's "37" counted relayed copies in a different window.) `unknown` listed `81` first, `guess` identified it as `#wardriving` (651 packets), and a rebuild matched the backfilled database's digest. | `channels add '#chattanooga'` backfills its packets; discovery lists `0x81` etc. |
 | 4 🟡 | **TUI**: channels, feed, RF view, nodes, packet inspector, filter bar, watches-as-highlights. Built 2026-09-13 as `ferromesh tui`, plus the server endpoints `/api/v1/nodes` and `/api/v1/packets/{hash}`. Tested on the Mac against a local server: text snapshots of every view (`--snapshot --keys`), and a real terminal session that drew the views, quit cleanly and restored the terminal. Lists sort by receive time, so a message decrypted when its channel is added appears where it was heard. The Linux run and the truffles deploy are pending. | Usable from a Mac and a Linux box on the LAN |
-| 5 | Companion source + send: own DMs, contacts, send channel/DM from TUI with ACK status | Send to `#test` from the TUI and see it echoed back via the repeater's MQTT feed |
-| 6 | Web UI (stack TBD) | Live feed + chat + search + nodes |
-| 7 | Alert sinks (ntfy), map, health charts, NashMesh source, retention/Parquet archive | as scoped then |
+| 5a ✅ | **Companion link, read-only.** A Rust driver for the companion protocol (USB serial; TCP uses the same framing): app start, device info, contacts, the message queue. The companion's receptions become a second observer, and DMs to it are stored as messages. Developed on the Mac. Built 2026-09-19: the codec in `meshcore_proto::companion`, the `[companion]` source in ferromeshd (serial auto-detect, reconnect, status every 5 min, stall warning), a `direct_messages` table, `GET /api/v1/direct` and `ferromesh dms`. Verified live on the Mac: over 3.5 minutes the Heltec (`scw`) and Tanyard heard the same 26 packets; a rebuild from the raw log matched the digest; after three flood adverts from `scw`, a DM from KK4SW's phone was stored and named its sender. Lesson: a companion can only decrypt DMs from contacts, so the first DM (sent before `scw` had heard KK4SW's advert) went over the air but couldn't be read. 5c should preload known nodes as contacts. | The companion appears as an observer beside Tanyard, and a DM to it is recorded |
+| 5b | **Send.** `POST /api/v1/send` (token), an outbox (queued → sent → delivered or failed, with round-trip time), matching each send against what observers heard, a TUI compose line and `ferromesh send`. Then move the radio to truffles. | Send to `#test` from the TUI and see it come back through Tanyard, with a delivery report |
+| 5c | **Radio management.** Keep the radio's channel slots in step with the server's list, contact policy, clock sync, advert schedule, and Tanyard status and telemetry via repeater login. Test whether `CMD_SEND_RAW_PACKET` can send to channels without a slot. | Tanyard's battery and noise floor are recorded every N minutes |
+| 6 | **Home Assistant bridge** (marbles.local): connect Home Assistant to the Mosquitto on truffles, then publish sensors, watch events and a send command through MQTT discovery | A watch match reaches your phone, and an automation posts to a channel |
+| 7 | Web UI (stack TBD) | Live feed + chat + search + nodes |
+| 8 | Analytics and more sources: coverage and path maps, node health, NashMesh as an observer, optional forwarding to community maps, retention/Parquet archive | as scoped then |
 
 ## 6. Open questions
 
-**Answered**, see §0: host, scope, dynamic channels, own DMs (via companion), identity, alerts timing, web deferral, send direction.
+**Answered**, see §0 and §4.6: host, scope, dynamic channels, own DMs (via companion), identity, alerts timing, web deferral, send direction, companion hardware (Heltec V4, stock USB firmware), companion sharing (server only).
 
 **Accepted proposals** (2026-09-12)
 - LAN access: reads are open; changes (channel keys now, sending later) need the server's `api.token`, which clients send as `--token` or `FERROMESH_TOKEN`.
@@ -206,8 +223,8 @@ Things to verify in phase 5: whether the companion can also stay paired to your 
 
 **Still open**
 1. **Web frontend stack.** You're deciding (not blocking phases 0–5).
-2. **Companion hardware.** Spare radio? USB into truffles OK physically (antenna placement)? (Phase 5.)
-3. **Companion sharing.** Dedicated to the server, or should your phone still use it? (Phase 5.)
+2. **Companion identity.** The node name others will see on what you send. (Phase 5a.)
+3. **Radio placement on truffles.** It only needs to reach Tanyard; if truffles' spot is poor, use a Wi-Fi companion build instead. (Phase 5b.)
 4. **Mosquitto on truffles.** Container (join its compose network) or host (host networking)? (Phase 1.)
 
 ## References

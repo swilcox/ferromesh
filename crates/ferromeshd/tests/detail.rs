@@ -1,9 +1,9 @@
-//! The nodes and packet-detail endpoints against a real server.
+//! The nodes, packet-detail and direct-message endpoints against a real server.
 
 use std::net::SocketAddr;
 
 use ed25519_dalek::{Signer, SigningKey};
-use ferromesh_model::{NodeInfo, PacketDetail};
+use ferromesh_model::{DirectMessageInfo, NodeInfo, PacketDetail};
 use ferromesh_store::{ChannelKind, Store};
 use ferromeshd::api::{self, AppState};
 use ferromeshd::pipeline::{self, Tally};
@@ -68,6 +68,17 @@ fn record(observer: (&str, u8), second: i64, frame: &[u8]) -> RawRecord {
     }
 }
 
+/// A companion radio's record, as its raw log line reads.
+fn companion(kind: &str, second: i64, frame: &[u8]) -> RawRecord {
+    RawRecord {
+        received_at: Timestamp::from_second(1_789_000_000 + second).unwrap(),
+        source: "companion:/dev/ttyACM0".into(),
+        topic: format!("companion/{}/{kind}", hex::encode_upper([7; 32])),
+        payload: serde_json::json!({ "origin": "desk", "frame": hex::encode_upper(frame) })
+            .to_string(),
+    }
+}
+
 fn advert(name: &str) -> Vec<u8> {
     let key = SigningKey::from_bytes(&[9; 32]);
     let pubkey = key.verifying_key().to_bytes();
@@ -113,4 +124,45 @@ async fn nodes_and_packet_detail() {
     assert_eq!(server.get("/api/v1/packets/not-a-hash").await.0, 400);
     assert_eq!(server.get("/api/v1/packets/0000000000000000").await.0, 404);
     assert_eq!(server.get("/api/v1/nodes?limit=0").await.0, 200);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn companion_receptions_and_direct_messages() {
+    let advert = advert("Hilltop");
+    let sender = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
+    // The radio's push of a packet it heard: SNR ×4, RSSI, then the frame.
+    let heard = [&[0x88, 26, (-60i8) as u8][..], &advert].concat();
+    // A v3 direct message from the advertiser, two hops away.
+    let dm = [
+        &[0x10, 20, 0, 0][..],
+        &sender[..6],
+        &[2, 0],
+        &1_789_000_050u32.to_le_bytes(),
+        b"are you there?",
+    ]
+    .concat();
+    let server = Server::start(&[
+        record(("Tanyard", 1), 1, &advert),
+        companion("rx", 2, &heard),
+        companion("message", 3, &dm),
+    ])
+    .await;
+
+    let hash = Packet::parse(&advert).unwrap().hash().to_string();
+    let (status, body) = server.get(&format!("/api/v1/packets/{hash}")).await;
+    assert_eq!(status, 200, "{body}");
+    let detail: PacketDetail = serde_json::from_str(&body).unwrap();
+    let receptions: Vec<_> =
+        detail.receptions.iter().map(|r| (r.observer.as_str(), r.snr, r.rssi)).collect();
+    assert_eq!(receptions, [("Tanyard", Some(-2.5), Some(-91)), ("desk", Some(6.5), Some(-60))]);
+
+    let (status, body) = server.get("/api/v1/direct").await;
+    assert_eq!(status, 200, "{body}");
+    let messages: Vec<DirectMessageInfo> = serde_json::from_str(&body).unwrap();
+    assert_eq!(messages.len(), 1);
+    let message = &messages[0];
+    assert_eq!((message.to.as_str(), message.sender.as_deref()), ("desk", Some("Hilltop")));
+    assert_eq!((message.hops, message.snr), (Some(2), Some(5.0)));
+    assert_eq!(message.body, "are you there?");
+    assert_eq!(message.sender_timestamp.as_second(), 1_789_000_050);
 }

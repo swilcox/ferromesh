@@ -13,8 +13,8 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use crate::config::Config;
-use crate::meshcoretomqtt::{self, Message};
 use crate::rawlog::RawRecord;
+use crate::source::{self, Message};
 
 /// Opens the database, creating it if needed, and adds configured channels.
 pub fn open_store(config: &Config) -> Result<Store> {
@@ -90,6 +90,7 @@ pub struct Tally {
     pub new_packets: u64,
     pub duplicates: u64,
     pub statuses: u64,
+    pub direct_messages: u64,
     pub malformed: u64,
     pub ignored: u64,
     pub unparsed: u64,
@@ -102,6 +103,7 @@ impl Tally {
         self.new_packets += other.new_packets;
         self.duplicates += other.duplicates;
         self.statuses += other.statuses;
+        self.direct_messages += other.direct_messages;
         self.malformed += other.malformed;
         self.ignored += other.ignored;
         self.unparsed += other.unparsed;
@@ -112,13 +114,14 @@ impl fmt::Display for Tally {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "records={} observations={} new_packets={} duplicates={} statuses={} malformed={} \
-             ignored={} unparsed={}",
+            "records={} observations={} new_packets={} duplicates={} statuses={} \
+             direct_messages={} malformed={} ignored={} unparsed={}",
             self.records,
             self.observations,
             self.new_packets,
             self.duplicates,
             self.statuses,
+            self.direct_messages,
             self.malformed,
             self.ignored,
             self.unparsed,
@@ -132,12 +135,19 @@ pub fn ingest(store: &mut Store, records: &[RawRecord], tally: &mut Tally) -> Re
     store.write(|batch| {
         for record in records {
             batch_tally.records += 1;
-            match meshcoretomqtt::parse(&record.topic, &record.payload) {
+            match source::parse(record) {
                 Err(e) => {
                     batch_tally.unparsed += 1;
                     warn!(topic = %record.topic, "unparseable message: {e:#}");
                 }
                 Ok(Message::Ignored) => batch_tally.ignored += 1,
+                Ok(Message::Direct(message)) => {
+                    if batch.record_direct_message(&message)? {
+                        batch_tally.direct_messages += 1;
+                    } else {
+                        batch_tally.duplicates += 1;
+                    }
+                }
                 Ok(Message::Status(report)) => {
                     if batch.record_status(&report)? {
                         batch_tally.statuses += 1;
@@ -188,6 +198,7 @@ pub fn format_counts(counts: &Counts) -> String {
         ("adverts", counts.adverts),
         ("nodes", counts.nodes),
         ("channels", counts.channels),
+        ("direct messages", counts.direct_messages),
     ]
     .iter()
     .map(|(label, count)| format!("{label:<15}{count:>10}"))

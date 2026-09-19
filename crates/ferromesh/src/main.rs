@@ -2,6 +2,7 @@
 
 mod channels;
 mod config;
+mod direct;
 mod render;
 mod server;
 mod tui;
@@ -87,6 +88,15 @@ enum Command {
         #[arg(long)]
         until: Option<When>,
         /// Print one JSON event per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Direct messages sent to your companion radio, oldest first.
+    Dms {
+        /// How many of the newest to show (at most 1000).
+        #[arg(long, short = 'n', default_value_t = 50)]
+        limit: usize,
+        /// Print one JSON message per line.
         #[arg(long)]
         json: bool,
     },
@@ -194,6 +204,7 @@ async fn run(cli: Cli) -> Result<()> {
             let window = (since.map(When::at), until.map(When::at));
             server::query(&server, kind, filter, limit, window, Printer::new(json)).await
         }
+        Command::Dms { limit, json } => direct::list(&server, limit, json).await,
         Command::Channels { command } => match command
             .unwrap_or(ChannelsCommand::List { json: false })
         {

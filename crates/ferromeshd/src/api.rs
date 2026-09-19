@@ -12,9 +12,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use ferromesh_model::{
-    AddChannel, ChannelInfo, DEFAULT_HISTORY_LIMIT, Event, Filter, Frame, GuessChannels,
-    GuessReport, Health, HistoryQuery, Kind, MAX_HISTORY_LIMIT, MAX_NODES, NodeInfo, NodesQuery,
-    PacketDetail, StreamQuery, UnknownChannel,
+    AddChannel, ChannelInfo, DEFAULT_HISTORY_LIMIT, DirectMessageInfo, DirectQuery, Event, Filter,
+    Frame, GuessChannels, GuessReport, Health, HistoryQuery, Kind, MAX_DIRECT, MAX_HISTORY_LIMIT,
+    MAX_NODES, NodeInfo, NodesQuery, PacketDetail, StreamQuery, UnknownChannel,
 };
 use ferromesh_store::{Micros, Order, Page, Reader};
 use tokio::net::TcpListener;
@@ -71,6 +71,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/channels/guess", post(guess_channels))
         .route("/api/v1/nodes", get(list_nodes))
         .route("/api/v1/packets/{hash}", get(packet_detail))
+        .route("/api/v1/direct", get(list_direct))
         .route("/api/v1/{kind}", get(history))
         .with_state(state)
 }
@@ -118,6 +119,14 @@ async fn list_nodes(
 ) -> Result<Json<Vec<NodeInfo>>, ApiError> {
     let limit = query.limit.unwrap_or(MAX_NODES).clamp(1, MAX_NODES);
     Ok(Json(read(&state, move |reader| reader.nodes(limit)).await?))
+}
+
+async fn list_direct(
+    State(state): State<AppState>,
+    Query(query): Query<DirectQuery>,
+) -> Result<Json<Vec<DirectMessageInfo>>, ApiError> {
+    let limit = query.limit.unwrap_or(DEFAULT_HISTORY_LIMIT).clamp(1, MAX_DIRECT);
+    Ok(Json(read(&state, move |reader| reader.direct_messages(limit)).await?))
 }
 
 async fn packet_detail(
