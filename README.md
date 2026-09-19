@@ -4,7 +4,7 @@ Records and explores [MeshCore](https://github.com/meshcore-dev/MeshCore) mesh t
 
 A MeshCore repeater running observer firmware (or [meshcoretomqtt](https://github.com/Cisien/meshcoretomqtt)) publishes every packet it hears to an MQTT broker. ferromesh subscribes, keeps every message verbatim, decodes what it can (adverts, plus channel messages for channels you know), stores it all in SQLite, and serves it to clients that show history and follow live traffic.
 
-**Status:** early. Decoding, storage, the API, channel discovery and a command-line client work. A terminal UI, alerts and sending are planned; see [PLAN.md](PLAN.md).
+**Status:** early. Decoding, storage, the API, channel discovery, a command-line client and a terminal UI work. Alerts beyond the terminal UI, and sending, are planned; see [PLAN.md](PLAN.md).
 
 ## Layout
 
@@ -14,7 +14,7 @@ A MeshCore repeater running observer firmware (or [meshcoretomqtt](https://githu
 | `crates/ferromesh-model` | Events, the filter language, and the API's wire format, shared by server and clients. |
 | `crates/ferromesh-store` | SQLite schema, ingest, queries and channel backfill. |
 | `crates/ferromeshd` | The server: MQTT ingest, raw log, HTTP/WebSocket API, and `import`, `rebuild`, `stats` commands. |
-| `crates/ferromesh` | The command-line client: `tail`, `query` and `channels`. |
+| `crates/ferromesh` | The client: `tail`, `query`, `channels` and the `tui` terminal UI. |
 | `tools/gen_fixture.py` | Builds the golden-test fixture from a capture. |
 
 ## Running the server
@@ -58,6 +58,26 @@ ferromesh query --kind packets type:advert --json
 
 Filters are space-separated terms that must all match: `chan:#test,#wx`, `from:BNA*`, a bare word to search message text, `type:advert`, `node:4d1727`, `observer:Tanyard`, and `'snr>-5'`, `'rssi<-100'` or `'hops>2'` for observations. A leading `-` negates a term. Quote `>` and `<` so the shell leaves them alone, and put double quotes around values with spaces: `'from:"BNA Bot"'`. One quoted argument can hold a whole filter: `'type:advert snr>-5'`.
 
+## Terminal UI
+
+```sh
+ferromesh tui
+```
+
+Five views, switched with `1` to `5`:
+
+- **Messages:** a channel list with unread counts, and each message once with how many times it was heard.
+- **Packets:** every distinct packet, decoded where possible.
+- **RF:** every reception, with its signal strength and its path, naming repeaters where the hop prefix identifies one.
+- **Nodes:** every node that has advertised.
+- **Alerts:** your watches, and new traffic that matched them.
+
+`Enter` opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field. `/` filters the current view, using the same filter language as `tail`. `w` saves a filter as a watch: matching traffic is highlighted, and new matches ring the bell and land in Alerts. Scrolling past the oldest row loads older history from the server. `?` lists every key.
+
+Watches are kept in `~/.config/ferromesh/watches.toml`. Defaults for `server` and `token` can go in `~/.config/ferromesh/config.toml`, so a bare `ferromesh tui` finds your server.
+
+`ferromesh tui --snapshot --size 120x40 --keys '3<enter>'` prints one screen as plain text, once everything has loaded, after pressing the given keys.
+
 ## Channels
 
 Everything is stored, including channel traffic nobody can read yet, so adding a channel later decodes its history too:
@@ -68,7 +88,7 @@ ferromesh channels unknown                    # channel hashes on traffic no kno
 ferromesh channels guess chattanooga tn-east  # try hashtag names, plus common and mentioned ones
 export FERROMESH_TOKEN=...                    # the server's api.token
 ferromesh channels add '#chattanooga'         # add it and decrypt what was waiting
-ferromesh channels add 'My Group' --key BASE64KEY
+ferromesh channels add 'My Group' --key SECRET  # hex, as in a MeshCore QR code, or base64
 ```
 
 Hashtag channels derive their key from the name, which is why guessing works; private channels need their key. A guess only counts when the key both passes the packet's MAC and decrypts to readable text. Channels listed in the server's config are added, and backfilled, at startup.
@@ -78,6 +98,8 @@ Hashtag channels derive their key from the name, which is why guessing works; pr
 - `GET /api/v1/{messages,packets,observations}?filter=&limit=&since=&until=` returns history.
 - A WebSocket at `/api/v1/stream?kind=&filter=&last=` sends history and then live events.
 - `GET /api/v1/channels`, `GET /api/v1/channels/unknown`, `POST /api/v1/channels/guess`, and `POST /api/v1/channels` (with `Authorization: Bearer <token>`) manage channels.
+- `GET /api/v1/nodes?limit=` lists nodes, most recently heard first.
+- `GET /api/v1/packets/{hash}` returns one packet with every reception's raw frame.
 
 See `crates/ferromesh-model/src/wire.rs`.
 

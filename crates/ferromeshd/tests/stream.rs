@@ -251,7 +251,7 @@ async fn history_endpoint_and_errors() {
     assert_eq!(status, 400);
     assert!(body.contains("doesn't apply to messages"), "{body}");
 
-    let (status, _) = server.get("/api/v1/nodes").await;
+    let (status, _) = server.get("/api/v1/widgets").await;
     assert_eq!(status, 404);
 
     let (status, body) = server.get("/api/v1/health").await;

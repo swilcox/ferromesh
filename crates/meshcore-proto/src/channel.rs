@@ -42,8 +42,24 @@ impl ChannelKey {
     }
 
     pub fn from_base64(key: &str) -> Result<Self, KeyError> {
-        let secret = BASE64.decode(key.trim()).map_err(|_| KeyError::Base64)?;
+        let secret = BASE64.decode(key.trim()).map_err(|_| KeyError::Format)?;
         Self::from_secret(&secret)
+    }
+
+    /// A secret as people share it: hex, as in MeshCore's QR codes and share
+    /// links, or base64. The two can't be confused, since 32 or 64 hex digits
+    /// read as base64 would be 24 or 48 bytes, neither a valid length.
+    pub fn parse(key: &str) -> Result<Self, KeyError> {
+        let key = key.trim();
+        if matches!(key.len(), 32 | 64) && key.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            let secret = hex::decode(key).map_err(|_| KeyError::Format)?;
+            return Self::from_secret(&secret);
+        }
+        Self::from_base64(key)
+    }
+
+    pub fn to_base64(&self) -> String {
+        BASE64.encode(self.secret())
     }
 
     /// Hashtag channels derive their secret from the name as typed, including
@@ -238,7 +254,25 @@ mod tests {
     fn secret_lengths() {
         assert_eq!(ChannelKey::from_secret(&[0; 15]), Err(KeyError::Length(15)));
         assert_eq!(ChannelKey::from_secret(&[0; 32]).unwrap().secret().len(), 32);
-        assert_eq!(ChannelKey::from_base64("not base64!"), Err(KeyError::Base64));
+        assert_eq!(ChannelKey::from_base64("not base64!"), Err(KeyError::Format));
+    }
+
+    #[test]
+    fn keys_parse_from_hex_or_base64() {
+        let public = ChannelKey::public();
+        let hex = hex::encode(public.secret());
+        assert_eq!(hex.len(), 32);
+        assert_eq!(ChannelKey::parse(&hex).unwrap(), public);
+        assert_eq!(ChannelKey::parse(&hex.to_uppercase()).unwrap(), public);
+        assert_eq!(ChannelKey::parse(PUBLIC_CHANNEL_KEY).unwrap(), public);
+        assert_eq!(ChannelKey::parse(&public.to_base64()).unwrap(), public);
+
+        let long = ChannelKey::from_secret(&[7; 32]).unwrap();
+        assert_eq!(ChannelKey::parse(&hex::encode([7; 32])).unwrap(), long);
+
+        // 30 hex digits is neither form.
+        assert_eq!(ChannelKey::parse(&hex[..30]), Err(KeyError::Format));
+        assert_eq!(ChannelKey::parse("not a key!"), Err(KeyError::Format));
     }
 
     #[test]

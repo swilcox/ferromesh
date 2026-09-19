@@ -54,6 +54,14 @@ impl Reader {
     pub fn guess_channels(&self, request: &GuessChannels) -> Result<GuessReport> {
         guess::guess_channels(&self.conn, request)
     }
+
+    pub fn nodes(&self, limit: usize) -> Result<Vec<ferromesh_model::NodeInfo>> {
+        crate::detail::nodes(&self.conn, limit)
+    }
+
+    pub fn packet_detail(&self, hash: &[u8]) -> Result<Option<ferromesh_model::PacketDetail>> {
+        crate::detail::packet_detail(&self.conn, hash)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

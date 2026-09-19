@@ -165,11 +165,14 @@ fn dim() -> Style {
 }
 
 fn named(name: &str) -> Style {
-    // FNV-1a over the lowercased name.
-    let hash = name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
+    Style::new().color(PALETTE[name_hash(name) as usize % PALETTE.len()])
+}
+
+/// FNV-1a over the lowercased name, for picking its colour.
+pub fn name_hash(name: &str) -> u32 {
+    name.bytes().fold(0x811c_9dc5_u32, |hash, byte| {
         (hash ^ u32::from(byte.to_ascii_lowercase())).wrapping_mul(0x0100_0193)
-    });
-    Style::new().color(PALETTE[hash as usize % PALETTE.len()])
+    })
 }
 
 fn type_style(payload_type: &str) -> Style {

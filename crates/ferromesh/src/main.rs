@@ -1,17 +1,20 @@
 //! ferromesh: the command-line client for a ferromeshd server.
 
 mod channels;
+mod config;
 mod render;
 mod server;
+mod tui;
 mod when;
 
 use std::io;
 use std::process::ExitCode;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use ferromesh_model::{Filter, GuessChannels, Kind};
 
+use crate::config::Settings;
 use crate::render::Printer;
 use crate::server::{Server, Start};
 use crate::when::When;
@@ -24,14 +27,17 @@ Filters are space-separated terms that must all match:
   observer:Tanyard observer name            'snr>-5' 'rssi<-100' 'hops>2'
 A leading - negates a term. Quote > and < from the shell, and put double quotes
 around values with spaces: 'from:\"BNA Bot\"'. One quoted argument can hold a
-whole filter: 'type:advert snr>-5'.";
+whole filter: 'type:advert snr>-5'.
+
+Defaults for --server and --token can go in ~/.config/ferromesh/config.toml:
+  server = \"truffles.local\"";
 
 #[derive(Parser)]
 #[command(version, about, after_help = FILTER_HELP)]
 struct Cli {
-    /// The ferromeshd server: a URL, or host[:port].
-    #[arg(long, short, global = true, env = "FERROMESH_SERVER", default_value = "localhost")]
-    server: String,
+    /// The ferromeshd server: a URL, or host[:port]. [default: localhost]
+    #[arg(long, short, global = true, env = "FERROMESH_SERVER")]
+    server: Option<String>,
 
     /// Token for changes such as adding channels (the server's api.token).
     #[arg(long, global = true, env = "FERROMESH_TOKEN", hide_env_values = true)]
@@ -89,6 +95,21 @@ enum Command {
         #[command(subcommand)]
         command: Option<ChannelsCommand>,
     },
+    /// Browse channels, packets, RF and nodes live, full screen. Press ? inside
+    /// for keys. Watches are kept in ~/.config/ferromesh/watches.toml.
+    Tui {
+        /// Print one screen as plain text once everything has loaded, and exit.
+        #[arg(long)]
+        snapshot: bool,
+        /// With --snapshot, keys to press first: characters as typed, plus
+        /// <enter>, <esc>, <tab>, <up>, <down>, <pgup>, <pgdn>, <home>, <end>,
+        /// <bs> and <lt>.
+        #[arg(long, requires = "snapshot")]
+        keys: Option<String>,
+        /// With --snapshot, the screen size. [default: 120x40]
+        #[arg(long, requires = "snapshot", value_parser = parse_size)]
+        size: Option<(u16, u16)>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -104,7 +125,7 @@ enum ChannelsCommand {
     Add {
         /// `#name` for a hashtag channel, or any name with --key.
         name: String,
-        /// The base64 secret of a private channel.
+        /// A private channel's secret, in hex (as in MeshCore QR codes) or base64.
         #[arg(long)]
         key: Option<String>,
     },
@@ -151,8 +172,13 @@ async fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<()> {
-    let server = Server::new(&cli.server);
-    let token = cli.token.as_deref();
+    let settings = match config::dir() {
+        Some(dir) => config::load_settings(&dir)?,
+        None => Settings::default(),
+    };
+    let server = Server::new(cli.server.or(settings.server).as_deref().unwrap_or("localhost"));
+    let token = cli.token.or(settings.token);
+    let token = token.as_deref();
     match cli.command {
         Command::Tail { filter, kind, last, since, live, json } => {
             let filter = filter_text(&filter, kind)?;
@@ -161,7 +187,7 @@ async fn run(cli: Cli) -> Result<()> {
                 (false, Some(since)) => Start::Since(since.at()),
                 (false, None) => Start::Last(last),
             };
-            server::tail(&server, kind, filter, start, Printer::new(json)).await
+            server::tail(&server, kind, filter, start, &mut Printer::new(json)).await
         }
         Command::Query { filter, kind, limit, since, until, json } => {
             let filter = filter_text(&filter, kind)?;
@@ -179,6 +205,16 @@ async fn run(cli: Cli) -> Result<()> {
                 channels::guess(&server, request, add, token).await
             }
         },
+        Command::Tui { snapshot, keys, size } => {
+            let snapshot = if snapshot {
+                let (width, height) = size.unwrap_or((120, 40));
+                let keys = tui::parse_keys(keys.as_deref().unwrap_or_default())?;
+                Some(tui::Snapshot { width, height, keys })
+            } else {
+                None
+            };
+            tui::run(server, snapshot).await
+        }
     }
 }
 
@@ -190,6 +226,16 @@ fn filter_text(args: &[String], kind: Kind) -> Result<Option<String>> {
     let filter: Filter = text.parse()?;
     filter.validate(kind)?;
     Ok((!filter.is_empty()).then_some(text))
+}
+
+/// `WIDTHxHEIGHT`, as for `--size 120x40`.
+fn parse_size(text: &str) -> Result<(u16, u16)> {
+    let size = text.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)));
+    match size {
+        Some((width, height)) if width >= 40 && height >= 10 => Ok((width, height)),
+        Some(_) => bail!("the screen must be at least 40x10"),
+        None => bail!("expected WIDTHxHEIGHT, such as 120x40"),
+    }
 }
 
 #[cfg(test)]
@@ -216,5 +262,18 @@ mod tests {
         let text = filter_text(&args(&["type:advert snr>-5"]), Kind::Observations).unwrap();
         let filter: Filter = text.unwrap().parse().unwrap();
         assert_eq!(filter.terms().len(), 2);
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("120x40").unwrap(), (120, 40));
+        assert!(parse_size("20x5").is_err());
+        assert!(parse_size("wide").is_err());
+    }
+
+    #[test]
+    fn snapshot_options_need_snapshot() {
+        assert!(Cli::try_parse_from(["ferromesh", "tui", "--keys", "3"]).is_err());
+        assert!(Cli::try_parse_from(["ferromesh", "tui", "--snapshot", "--keys", "3"]).is_ok());
     }
 }

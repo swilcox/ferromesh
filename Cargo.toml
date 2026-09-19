@@ -18,12 +18,14 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 base64 = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 ed25519-dalek = "3"
 futures-util = "0.3"
 hex = "0.4"
 hmac = "0.13"
 jiff = { version = "0.2", features = ["serde"] }
 owo-colors = { version = "4", features = ["supports-colors"] }
+ratatui = "0.30"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
 rumqttc = { version = "0.25", default-features = false }
 rusqlite = { version = "0.40", features = ["bundled"] }

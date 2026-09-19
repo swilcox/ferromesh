@@ -13,7 +13,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use ferromesh_model::{
     AddChannel, ChannelInfo, DEFAULT_HISTORY_LIMIT, Event, Filter, Frame, GuessChannels,
-    GuessReport, Health, HistoryQuery, Kind, MAX_HISTORY_LIMIT, StreamQuery, UnknownChannel,
+    GuessReport, Health, HistoryQuery, Kind, MAX_HISTORY_LIMIT, MAX_NODES, NodeInfo, NodesQuery,
+    PacketDetail, StreamQuery, UnknownChannel,
 };
 use ferromesh_store::{Micros, Order, Page, Reader};
 use tokio::net::TcpListener;
@@ -68,6 +69,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/channels", get(list_channels).post(add_channel))
         .route("/api/v1/channels/unknown", get(unknown_channels))
         .route("/api/v1/channels/guess", post(guess_channels))
+        .route("/api/v1/nodes", get(list_nodes))
+        .route("/api/v1/packets/{hash}", get(packet_detail))
         .route("/api/v1/{kind}", get(history))
         .with_state(state)
 }
@@ -107,6 +110,27 @@ async fn history(
     };
     let events = read(&state, move |reader| reader.history(kind, &filter, &page)).await?;
     Ok(Json(events))
+}
+
+async fn list_nodes(
+    State(state): State<AppState>,
+    Query(query): Query<NodesQuery>,
+) -> Result<Json<Vec<NodeInfo>>, ApiError> {
+    let limit = query.limit.unwrap_or(MAX_NODES).clamp(1, MAX_NODES);
+    Ok(Json(read(&state, move |reader| reader.nodes(limit)).await?))
+}
+
+async fn packet_detail(
+    State(state): State<AppState>,
+    Path(hash): Path<String>,
+) -> Result<Json<PacketDetail>, ApiError> {
+    let bytes = hex::decode(&hash).ok().filter(|bytes| bytes.len() == 8).ok_or_else(|| {
+        ApiError::new(StatusCode::BAD_REQUEST, format!("{hash:?} is not a 16-digit packet hash"))
+    })?;
+    read(&state, move |reader| reader.packet_detail(&bytes))
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "no packet has that hash"))
 }
 
 async fn list_channels(State(state): State<AppState>) -> Result<Json<Vec<ChannelInfo>>, ApiError> {

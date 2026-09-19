@@ -12,6 +12,11 @@
 //! - `POST /api/v1/channels/guess` with [`GuessChannels`](crate::GuessChannels)
 //!   returns a [`GuessReport`](crate::GuessReport).
 //!
+//! - `GET /api/v1/nodes` returns [`NodeInfo`](crate::NodeInfo)s, most recently
+//!   heard first.
+//! - `GET /api/v1/packets/{hash}` returns a [`PacketDetail`](crate::PacketDetail)
+//!   with every reception's frame.
+//!
 //! Errors are JSON `{"error": "..."}` with a matching HTTP status.
 
 use jiff::Timestamp;

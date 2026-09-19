@@ -1,5 +1,5 @@
-//! Talking to ferromeshd: history and channels over HTTP, live traffic over a
-//! WebSocket.
+//! Talking to ferromeshd: history, channels and details over HTTP, live
+//! traffic over a WebSocket.
 
 use std::time::Duration;
 
@@ -42,6 +42,11 @@ impl Server {
         Self { base }
     }
 
+    /// `host:port`, for display.
+    pub fn address(&self) -> &str {
+        self.base.split_once("://").map_or(&self.base, |(_, rest)| rest)
+    }
+
     pub async fn get<T: DeserializeOwned>(&self, path_and_query: &str) -> Result<T> {
         let response = reqwest::get(format!("{}{path_and_query}", self.base))
             .await
@@ -64,7 +69,8 @@ impl Server {
         decode(response).await
     }
 
-    fn path(&self, path: &str, query: &impl Serialize) -> Result<String> {
+    /// `path?query`, URL-encoded.
+    pub fn path(&self, path: &str, query: &impl Serialize) -> Result<String> {
         Ok(format!("{path}?{}", serde_urlencoded::to_string(query)?))
     }
 
@@ -118,6 +124,37 @@ pub async fn query(
     Ok(())
 }
 
+/// Where a followed stream's traffic goes: the terminal for `tail`, the app
+/// state for the TUI.
+pub trait Sink {
+    fn event(&mut self, event: Event) -> Result<()>;
+    /// History is done and later events are live. `reconnected` is true when
+    /// this follows a dropped connection.
+    fn caught_up(&mut self, reconnected: bool) -> Result<()>;
+    /// The connection dropped; the next attempt comes after `retry`.
+    fn lost(&mut self, reason: &str, retry: Duration) -> Result<()>;
+}
+
+impl Sink for Printer {
+    fn event(&mut self, event: Event) -> Result<()> {
+        Ok(Printer::event(self, &event)?)
+    }
+
+    fn caught_up(&mut self, reconnected: bool) -> Result<()> {
+        if reconnected {
+            render::status("reconnected");
+            Ok(())
+        } else {
+            Ok(self.live()?)
+        }
+    }
+
+    fn lost(&mut self, reason: &str, retry: Duration) -> Result<()> {
+        render::status(format_args!("{reason}; reconnecting in {}s", retry.as_secs()));
+        Ok(())
+    }
+}
+
 /// Follows a stream until interrupted, resuming after the last event seen
 /// whenever the connection drops, so nothing is missed or repeated.
 pub async fn tail(
@@ -125,7 +162,7 @@ pub async fn tail(
     kind: Kind,
     filter: Option<String>,
     start: Start,
-    mut printer: Printer,
+    sink: &mut impl Sink,
 ) -> Result<()> {
     let mut resume = None;
     let mut reconnecting = false;
@@ -137,13 +174,13 @@ pub async fn tail(
             (None, Start::Since(at)) => (None, Some(*at)),
         };
         let query = StreamQuery { kind, filter: filter.clone(), after: resume, since, last };
-        match follow(&server.stream_url(&query)?, &mut printer, &mut resume, reconnecting).await? {
+        match follow(&server.stream_url(&query)?, sink, &mut resume, reconnecting).await? {
             Ended::Quit => return Ok(()),
             Ended::Lost { reason, was_live } => {
                 if was_live {
                     retry = RETRY_MIN;
                 }
-                render::status(format_args!("{reason}; reconnecting in {}s", retry.as_secs()));
+                sink.lost(&reason, retry)?;
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => return Ok(()),
                     _ = tokio::time::sleep(retry) => {}
@@ -164,7 +201,7 @@ enum Ended {
 /// as a rejected filter, come back as errors.
 async fn follow(
     url: &str,
-    printer: &mut Printer,
+    sink: &mut impl Sink,
     resume: &mut Option<i64>,
     reconnecting: bool,
 ) -> Result<Ended> {
@@ -201,15 +238,11 @@ async fn follow(
         match serde_json::from_str::<Frame>(text.as_str()).context("unexpected message")? {
             Frame::Event { event } => {
                 *resume = Some(event.id());
-                printer.event(&event)?;
+                sink.event(event)?;
             }
             Frame::CaughtUp { last_id } => {
                 *resume = Some(resume.map_or(last_id, |id| id.max(last_id)));
-                if reconnecting {
-                    render::status("reconnected");
-                } else {
-                    printer.live()?;
-                }
+                sink.caught_up(reconnecting)?;
                 live = true;
             }
             Frame::Error { message } => return Ok(lost(format!("server error: {message}"), live)),
@@ -239,6 +272,7 @@ mod tests {
         assert_eq!(Server::new("truffles.local:8000").base, "http://truffles.local:8000");
         assert_eq!(Server::new("http://truffles.local:7373/").base, "http://truffles.local:7373");
         assert_eq!(Server::new("[::1]").base, "http://[::1]:7373");
+        assert_eq!(Server::new("truffles.local").address(), "truffles.local:7373");
     }
 
     #[test]

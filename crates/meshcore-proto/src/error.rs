@@ -21,6 +21,6 @@ pub enum KeyError {
     #[error("channel secret must be 16 or 32 bytes, got {0}")]
     Length(usize),
 
-    #[error("channel key is not valid base64")]
-    Base64,
+    #[error("channel key is neither 32 or 64 hex digits nor base64")]
+    Format,
 }

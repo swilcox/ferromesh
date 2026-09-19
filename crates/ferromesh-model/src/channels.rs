@@ -18,7 +18,7 @@ pub struct ChannelInfo {
 }
 
 /// `POST /api/v1/channels`. A hashtag channel (`#name`) needs only its name;
-/// any other channel needs its base64 key.
+/// any other channel needs its key, in hex or base64.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AddChannel {
     pub name: String,

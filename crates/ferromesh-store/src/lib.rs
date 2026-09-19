@@ -11,6 +11,7 @@
 //!
 //! Timestamps are [`Micros`]: microseconds since the Unix epoch, UTC.
 
+mod detail;
 mod digest;
 mod guess;
 mod ingest;
@@ -298,6 +299,14 @@ impl Store {
 
     pub fn guess_channels(&self, request: &GuessChannels) -> Result<GuessReport> {
         guess::guess_channels(&self.conn, request)
+    }
+
+    pub fn nodes(&self, limit: usize) -> Result<Vec<ferromesh_model::NodeInfo>> {
+        detail::nodes(&self.conn, limit)
+    }
+
+    pub fn packet_detail(&self, hash: &[u8]) -> Result<Option<ferromesh_model::PacketDetail>> {
+        detail::packet_detail(&self.conn, hash)
     }
 
     pub fn counts(&self) -> Result<Counts> {

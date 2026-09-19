@@ -2,12 +2,13 @@
 
 use std::io::{self, Write};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ferromesh_model::{
     AddChannel, ChannelAdded, ChannelInfo, GuessChannels, GuessReport, UnknownChannel,
 };
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
+use meshcore_proto::ChannelKey;
 use serde::Serialize;
 
 use crate::render;
@@ -39,6 +40,11 @@ pub async fn add(
     key: Option<String>,
     token: Option<&str>,
 ) -> Result<()> {
+    // Checked here, and sent as base64, which every server version accepts.
+    let key = key
+        .map(|key| ChannelKey::parse(&key).map(|key| key.to_base64()))
+        .transpose()
+        .with_context(|| format!("channel {name:?}"))?;
     let added: ChannelAdded =
         server.post("/api/v1/channels", &AddChannel { name, key }, token).await?;
     let (channel, backfill) = (&added.channel, added.backfill);

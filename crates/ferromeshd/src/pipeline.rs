@@ -40,12 +40,12 @@ pub fn add_configured_channels(store: &mut Store, config: &Config) -> Result<()>
 }
 
 /// A hashtag channel (`#name`) derives its key from the name; any other
-/// channel needs its base64 key.
+/// channel needs its key, in hex or base64.
 pub fn channel_key(name: &str, key: Option<&str>) -> Result<(ChannelKey, ChannelKind)> {
     ensure!(!name.is_empty(), "channel name is empty");
     match key {
         Some(key) => Ok((
-            ChannelKey::from_base64(key).with_context(|| format!("channel {name:?}"))?,
+            ChannelKey::parse(key).with_context(|| format!("channel {name:?}"))?,
             ChannelKind::Key,
         )),
         None if name.starts_with('#') && name.len() > 1 => {
@@ -203,8 +203,10 @@ mod tests {
     fn channel_keys() {
         let (key, kind) = channel_key("#test", None).unwrap();
         assert_eq!((key, kind), (ChannelKey::from_hashtag("#test"), ChannelKind::Hashtag));
-        let (_, kind) = channel_key("Family", Some("izOH6cXN6mrJ5e26oRXNcg==")).unwrap();
+        let (base64, kind) = channel_key("Family", Some("izOH6cXN6mrJ5e26oRXNcg==")).unwrap();
         assert_eq!(kind, ChannelKind::Key);
+        let (hex, _) = channel_key("Family", Some("8b3387e9c5cdea6ac9e5edbaa115cd72")).unwrap();
+        assert_eq!(hex, base64);
         assert!(channel_key("test", None).is_err());
         assert!(channel_key("#", None).is_err());
         assert!(channel_key("", None).is_err());

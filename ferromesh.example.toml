@@ -24,11 +24,12 @@ listen = "0.0.0.0:7373"
 # token = "..."
 
 # Channels to decrypt. The public channel is always included.
-# Hashtag channels need only their name. Private channels also need their base64 key:
+# Hashtag channels need only their name. Private channels also need their key,
+# in hex (as in MeshCore QR codes) or base64:
 #
 # [[channel]]
 # name = "My Group"
-# key = "BASE64_16_BYTE_KEY_HERE=="
+# key = "0123456789abcdef0123456789abcdef"
 
 [[channel]]
 name = "#test"
