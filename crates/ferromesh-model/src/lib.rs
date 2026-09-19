@@ -8,6 +8,7 @@ mod detail;
 mod direct;
 mod event;
 pub mod filter;
+mod health;
 mod radio;
 mod send;
 mod wire;
@@ -20,6 +21,9 @@ pub use detail::{MAX_NODES, NodeInfo, NodesQuery, PacketDetail, PacketReception}
 pub use direct::{DirectMessageInfo, DirectQuery, MAX_DIRECT};
 pub use event::{Advert, DecodeState, Event, Kind, MessageEvent, ObservationEvent, PacketEvent};
 pub use filter::{Filter, FilterError};
+pub use health::{
+    DEFAULT_HEALTH_HOURS, HealthHour, HealthQuery, MAX_HEALTH_HOURS, ObserverHealth, ObserverState,
+};
 pub use radio::{PinRequest, RadioContact};
 pub use send::{MAX_OUTBOX, OutboxQuery, SendRequest, SendStatus, SentMessageInfo};
 pub use wire::{

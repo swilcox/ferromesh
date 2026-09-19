@@ -79,7 +79,10 @@ ferromesh tail --kind observations 'snr>-5'   # every reception, with signal and
 ferromesh query from:BNA* --since 6h
 ferromesh query --kind packets type:advert --json
 ferromesh dms                                 # direct messages to your companion radio
+ferromesh health                              # how each observer is doing (--hours 168 for a week)
 ```
+
+`health` reads the status reports observers send every few minutes: battery, noise floor, packets received and sent, receive errors, airtime and restarts, with hourly trends. It also checks delivery: the packets each observer counted receiving against the receptions stored from it, so any loss between the radio and the database shows up. Warnings flag an overdue report, a restart, a low battery, a noise floor well above its usual level, and delivery below 99%. The TUI shows the same on its Health view (`6`).
 
 ### Sending
 
@@ -105,13 +108,14 @@ Filters are space-separated terms that must all match: `chan:#test,#wx`, `from:B
 ferromesh tui
 ```
 
-Five views, switched with `1` to `5`:
+Six views, switched with `1` to `6`:
 
 - **Messages:** a channel list with unread counts, and each message once with how many times it was heard.
 - **Packets:** every distinct packet, decoded where possible.
 - **RF:** every reception, with its signal strength and its path, naming repeaters where the hop prefix identifies one.
 - **Nodes:** every node that has advertised.
 - **Alerts:** your watches, and new traffic that matched them.
+- **Health:** each observer's battery, noise floor, traffic and delivery, with trends and warnings.
 
 `c` composes a message to the selected channel (it needs the token, from `--token`, `FERROMESH_TOKEN` or the config file). `Enter` opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field. `/` filters the current view, using the same filter language as `tail`. `w` saves a filter as a watch: matching traffic is highlighted, and new matches ring the bell and land in Alerts. Scrolling past the oldest row loads older history from the server. `?` lists every key.
 
@@ -142,6 +146,7 @@ Hashtag channels derive their key from the name, which is why guessing works; pr
 - `GET /api/v1/nodes?limit=` lists nodes, most recently heard first.
 - `GET /api/v1/packets/{hash}` returns one packet with every reception's raw frame.
 - `GET /api/v1/direct?limit=` returns direct messages to your companion radio, newest first.
+- `GET /api/v1/observers?hours=` returns each observer's health: figures, hourly history, and warnings.
 - `GET /api/v1/contacts` lists the companion radio's contacts; `POST /api/v1/contacts` (with the token) pins or unpins one: `{"to": ..., "pinned": true}`.
 - `POST /api/v1/send` (with the token) sends `{"to": ..., "text": ...}` through the companion radio; `GET /api/v1/outbox?limit=` lists what was sent, with who heard it or whether it was acknowledged.
 

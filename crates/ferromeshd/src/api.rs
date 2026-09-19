@@ -12,10 +12,11 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use ferromesh_model::{
-    AddChannel, ChannelInfo, DEFAULT_HISTORY_LIMIT, DirectMessageInfo, DirectQuery, Event, Filter,
-    Frame, GuessChannels, GuessReport, Health, HistoryQuery, Kind, MAX_DIRECT, MAX_HISTORY_LIMIT,
-    MAX_NODES, MAX_OUTBOX, NodeInfo, NodesQuery, OutboxQuery, PacketDetail, PinRequest,
-    RadioContact, SendRequest, SentMessageInfo, StreamQuery, UnknownChannel,
+    AddChannel, ChannelInfo, DEFAULT_HEALTH_HOURS, DEFAULT_HISTORY_LIMIT, DirectMessageInfo,
+    DirectQuery, Event, Filter, Frame, GuessChannels, GuessReport, Health, HealthQuery,
+    HistoryQuery, Kind, MAX_DIRECT, MAX_HEALTH_HOURS, MAX_HISTORY_LIMIT, MAX_NODES, MAX_OUTBOX,
+    NodeInfo, NodesQuery, ObserverHealth, OutboxQuery, PacketDetail, PinRequest, RadioContact,
+    SendRequest, SentMessageInfo, StreamQuery, UnknownChannel,
 };
 use ferromesh_store::{Micros, Order, Page, Reader, SendTarget};
 use jiff::Timestamp;
@@ -96,6 +97,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/send", post(send_message))
         .route("/api/v1/outbox", get(list_outbox))
         .route("/api/v1/contacts", get(list_contacts).post(pin_contact))
+        .route("/api/v1/observers", get(observer_health))
         .route("/api/v1/{kind}", get(history))
         .with_state(state)
 }
@@ -382,6 +384,15 @@ fn radio_contact(contact: &Contact) -> RadioContact {
         // The length byte's low six bits count the hops.
         route_hops: contact.out_path_len.map(|len| len & 0x3F),
     }
+}
+
+async fn observer_health(
+    State(state): State<AppState>,
+    Query(query): Query<HealthQuery>,
+) -> Result<Json<Vec<ObserverHealth>>, ApiError> {
+    let hours = query.hours.unwrap_or(DEFAULT_HEALTH_HOURS).clamp(1, MAX_HEALTH_HOURS);
+    let now = Timestamp::now().as_microsecond();
+    Ok(Json(read(&state, move |reader| reader.observer_health(now, hours)).await?))
 }
 
 async fn list_outbox(

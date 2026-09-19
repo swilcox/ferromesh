@@ -197,6 +197,10 @@ CREATE TABLE sent_messages (
 CREATE INDEX sent_messages_by_time ON sent_messages (sent_at);
 CREATE INDEX sent_messages_by_ack ON sent_messages (observer_id, expected_ack);
 "#,
+    r#"
+-- Health checks read one observer's receptions over a time window.
+CREATE INDEX observations_by_observer ON observations (observer_id, rx_at);
+"#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {

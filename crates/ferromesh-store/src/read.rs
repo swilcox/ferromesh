@@ -82,6 +82,15 @@ impl Reader {
         crate::detail::nodes_by_key_prefix(&self.conn, prefix)
     }
 
+    /// Each observer's health over the last `hours`, as of `now`.
+    pub fn observer_health(
+        &self,
+        now: Micros,
+        hours: u32,
+    ) -> Result<Vec<ferromesh_model::ObserverHealth>> {
+        crate::health::observer_health(&self.conn, now, hours)
+    }
+
     /// What a send's `to` names: a channel, or a node.
     pub fn send_target(&self, to: &str) -> Result<crate::SendTarget> {
         crate::detail::send_target(&self.conn, to)

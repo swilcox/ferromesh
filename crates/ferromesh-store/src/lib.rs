@@ -14,6 +14,7 @@
 mod detail;
 mod digest;
 mod guess;
+mod health;
 mod ingest;
 mod read;
 mod schema;
@@ -322,6 +323,15 @@ impl Store {
         now: Micros,
     ) -> Result<Vec<ferromesh_model::SentMessageInfo>> {
         detail::outbox(&self.conn, limit, now)
+    }
+
+    /// Each observer's health over the last `hours`, as of `now`.
+    pub fn observer_health(
+        &self,
+        now: Micros,
+        hours: u32,
+    ) -> Result<Vec<ferromesh_model::ObserverHealth>> {
+        health::observer_health(&self.conn, now, hours)
     }
 
     pub fn send_target(&self, to: &str) -> Result<SendTarget> {

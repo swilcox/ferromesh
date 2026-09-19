@@ -4,6 +4,7 @@ mod channels;
 mod config;
 mod contacts;
 mod direct;
+mod health;
 mod render;
 mod send;
 mod server;
@@ -112,6 +113,17 @@ enum Command {
     Contacts {
         #[command(subcommand)]
         command: Option<ContactsCommand>,
+    },
+    /// How each observer (your repeater, the companion radio) is doing: its
+    /// battery, noise floor, traffic and airtime, with hourly trends, and
+    /// whether every packet it heard reached the server.
+    Health {
+        /// How far back the figures and trends reach.
+        #[arg(long, default_value_t = 24)]
+        hours: u32,
+        /// Print one JSON observer per line.
+        #[arg(long)]
+        json: bool,
     },
     /// Direct messages sent to your companion radio, oldest first.
     Dms {
@@ -251,6 +263,7 @@ async fn run(cli: Cli) -> Result<()> {
             send::send(&server, to, text.join(" "), token, Duration::from_secs(follow)).await
         }
         Command::Dms { limit, json } => direct::list(&server, limit, json).await,
+        Command::Health { hours, json } => health::show(&server, hours, json).await,
         Command::Contacts { command } => {
             match command.unwrap_or(ContactsCommand::List { json: false }) {
                 ContactsCommand::List { json } => contacts::list(&server, json).await,

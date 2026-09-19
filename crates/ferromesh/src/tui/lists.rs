@@ -1,6 +1,6 @@
-//! The table views: packets, RF, nodes and alerts.
+//! The views besides messages: packets, RF, nodes, alerts and health.
 
-use ferromesh_model::{Event, Kind, ObservationEvent, PacketEvent};
+use ferromesh_model::{Event, Kind, ObservationEvent, ObserverState, PacketEvent};
 use jiff::Timestamp;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -10,6 +10,7 @@ use ratatui::widgets::{Cell, List, ListItem, ListState, Paragraph, Row, Table, T
 
 use super::app::{App, View};
 use super::ui::{self, Screen, pane};
+use crate::health;
 
 /// SNR bar cells, spanning -20 dB to +12 dB.
 const BAR: usize = 8;
@@ -248,6 +249,60 @@ pub fn draw_nodes(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen)
     let mut state = TableState::default().with_selected(selected.map(|index| index - rows.start));
     let table = Table::new(body, widths).header(header).row_highlight_style(ui::highlight());
     frame.render_stateful_widget(table, inner, &mut state);
+}
+
+/// Each observer's health: its state, figures with hourly trends, and
+/// warnings.
+pub fn draw_health(frame: &mut Frame, area: Rect, app: &App) {
+    let block = pane(Line::from("Health"), true);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let observers = match &app.health {
+        Err(error) => {
+            let note = format!("couldn't load observer health: {error}");
+            frame.render_widget(
+                Paragraph::new(note).red().wrap(ratatui::widgets::Wrap { trim: true }),
+                inner,
+            );
+            return;
+        }
+        Ok(observers) if observers.is_empty() => {
+            frame.render_widget(
+                Paragraph::new("no observer has sent a status report yet").dim(),
+                inner,
+            );
+            return;
+        }
+        Ok(observers) => observers,
+    };
+    let mut lines = Vec::new();
+    for observer in observers {
+        let color = match observer.state {
+            ObserverState::Online => Color::Green,
+            ObserverState::Stale => Color::Yellow,
+            ObserverState::Offline => Color::Red,
+        };
+        lines.push(Line::from(vec![
+            Span::styled("● ", color),
+            Span::raw(health::title(observer)).bold(),
+            Span::raw("  "),
+            Span::raw(health::status(observer, app.now)).dim(),
+        ]));
+        for figure in health::figures(observer) {
+            lines.push(Line::from(vec![
+                Span::raw(format!("  {:<12}", figure.label)).dim(),
+                Span::raw(format!("{:<52} ", figure.value)),
+                Span::styled(figure.trend, Color::Cyan),
+            ]));
+        }
+        for warning in &observer.warnings {
+            lines.push(Line::from(Span::styled(format!("  ! {warning}"), Color::Yellow)));
+        }
+        lines.push(Line::default());
+    }
+    let hours = observers.first().map_or(24, |observer| observer.history.len());
+    lines.push(Line::from(health::trend_note(hours)).dim());
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 pub fn draw_alerts(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {

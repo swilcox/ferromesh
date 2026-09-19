@@ -4,7 +4,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ferromesh_model::{ChannelInfo, Event, Filter, FilterError, Kind, NodeInfo, PacketDetail};
+use ferromesh_model::{
+    ChannelInfo, Event, Filter, FilterError, Kind, NodeInfo, ObserverHealth, PacketDetail,
+};
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
@@ -26,10 +28,12 @@ pub enum View {
     Rf,
     Nodes,
     Alerts,
+    Health,
 }
 
 impl View {
-    pub const ALL: [Self; 5] = [Self::Messages, Self::Packets, Self::Rf, Self::Nodes, Self::Alerts];
+    pub const ALL: [Self; 6] =
+        [Self::Messages, Self::Packets, Self::Rf, Self::Nodes, Self::Alerts, Self::Health];
 
     pub const fn title(self) -> &'static str {
         match self {
@@ -38,6 +42,7 @@ impl View {
             Self::Rf => "RF",
             Self::Nodes => "Nodes",
             Self::Alerts => "Alerts",
+            Self::Health => "Health",
         }
     }
 
@@ -47,7 +52,7 @@ impl View {
             Self::Messages => Some(Kind::Messages),
             Self::Packets => Some(Kind::Packets),
             Self::Rf => Some(Kind::Observations),
-            Self::Nodes | Self::Alerts => None,
+            Self::Nodes | Self::Alerts | Self::Health => None,
         }
     }
 }
@@ -176,8 +181,14 @@ pub enum Update {
     Lost(Kind, String),
     Channels(Vec<ChannelInfo>),
     Nodes(Vec<NodeInfo>),
+    /// Observers' health, or why it couldn't be fetched.
+    Health(Result<Vec<ObserverHealth>, String>),
     Detail(String, Result<PacketDetail, String>),
-    Older { kind: Kind, filter: Option<String>, result: Result<Vec<Event>, String> },
+    Older {
+        kind: Kind,
+        filter: Option<String>,
+        result: Result<Vec<Event>, String>,
+    },
     Status(String),
 }
 
@@ -197,6 +208,7 @@ pub struct App {
     feeds: [Feed; 3],
     pub channels: Vec<ChannelInfo>,
     pub nodes: Vec<NodeInfo>,
+    pub health: Result<Vec<ObserverHealth>, String>,
     /// Node names by lowercase public-key prefix of 1–3 bytes, `None` where
     /// the prefix is ambiguous or the node unnamed.
     hop_names: HashMap<String, Option<String>>,
@@ -239,6 +251,7 @@ impl App {
             feeds: Default::default(),
             channels: Vec::new(),
             nodes: Vec::new(),
+            health: Ok(Vec::new()),
             hop_names: HashMap::new(),
             channel: None,
             sidebar_focus: false,
@@ -420,6 +433,7 @@ impl App {
             }
             Update::Lost(kind, reason) => self.feed_mut(kind).connection = Connection::Lost(reason),
             Update::Channels(channels) => self.channels = channels,
+            Update::Health(health) => self.health = health,
             Update::Nodes(nodes) => {
                 self.hop_names.clear();
                 for node in &nodes {
@@ -569,7 +583,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char(digit @ '1'..='5') => {
+            KeyCode::Char(digit @ '1'..='6') => {
                 self.show(View::ALL[usize::from(digit as u8 - b'1')])
             }
             KeyCode::Char('?') => self.help = true,
@@ -740,8 +754,12 @@ impl App {
     }
 
     fn prompt(&mut self, prompt: Prompt) {
-        if prompt == Prompt::Watch && self.view == View::Nodes {
+        if prompt == Prompt::Watch && matches!(self.view, View::Nodes | View::Health) {
             self.status = Some("watches apply to messages, packets and RF".into());
+            return;
+        }
+        if prompt == Prompt::Filter && self.view == View::Health {
+            self.status = Some("there's nothing to filter here".into());
             return;
         }
         if prompt == Prompt::Compose {

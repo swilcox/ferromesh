@@ -18,8 +18,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use ferromesh_model::{
-    ChannelInfo, Event, HistoryQuery, Kind, MAX_NODES, NodeInfo, PacketDetail, SendRequest,
-    SentMessageInfo,
+    ChannelInfo, Event, HistoryQuery, Kind, MAX_NODES, NodeInfo, ObserverHealth, PacketDetail,
+    SendRequest, SentMessageInfo,
 };
 use futures_util::StreamExt;
 use jiff::Timestamp;
@@ -284,6 +284,11 @@ async fn fetch_lists(server: &Server, updates: &UnboundedSender<Update>) {
             Err(error) => Update::Status(format!("couldn't load nodes: {error:#}")),
         };
     let _ = updates.send(update);
+    let health = server
+        .get::<Vec<ObserverHealth>>("/api/v1/observers?hours=24")
+        .await
+        .map_err(|error| format!("{error:#}"));
+    let _ = updates.send(Update::Health(health));
 }
 
 /// Keys for `--keys`: characters as typed, plus `<enter>`, `<esc>`, `<tab>`,

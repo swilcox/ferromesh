@@ -178,7 +178,7 @@ fn row(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("1-5", "messages, packets, RF, nodes, alerts"),
+    ("1-6", "messages, packets, RF, nodes, alerts, health"),
     ("Tab", "channel list (messages), watch list (alerts)"),
     ("j k ↑ ↓", "move; PgUp PgDn by a page"),
     ("g Home", "oldest loaded; again to load older"),

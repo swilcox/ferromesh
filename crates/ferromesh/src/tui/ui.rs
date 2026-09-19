@@ -51,6 +51,7 @@ pub fn draw(frame: &mut Frame, app: &App, screen: &mut Screen) {
         View::Packets | View::Rf => lists::draw_events(frame, body, app, screen),
         View::Nodes => lists::draw_nodes(frame, body, app, screen),
         View::Alerts => lists::draw_alerts(frame, body, app, screen),
+        View::Health => lists::draw_health(frame, body, app),
     }
     draw_footer(frame, footer, app);
     if let Some(inspector) = &app.inspector {
@@ -164,6 +165,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                     "/ filter  w watch  Enter inspect  g/G top/end  ? help  q quit"
                 }
                 View::Nodes => "/ search  ? help  q quit",
+                View::Health => {
+                    "from each observer's status reports; refreshed every minute  ? help"
+                }
                 View::Alerts => {
                     "Tab watches  d delete watch  c clear  Enter inspect  b bell  ? help"
                 }
@@ -614,7 +618,7 @@ mod tests {
         fn every_view_at_any_size() {
             for (width, height) in [(40, 10), (100, 30)] {
                 let mut app = app();
-                for key in ['1', '2', '3', '4', '5'] {
+                for key in ['1', '2', '3', '4', '5', '6'] {
                     press(&mut app, KeyCode::Char(key));
                     render(&app, width, height);
                     press(&mut app, KeyCode::Char('?'));
