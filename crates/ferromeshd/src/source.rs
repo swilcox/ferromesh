@@ -1,7 +1,7 @@
 //! What a raw record says, whichever source wrote it.
 
 use anyhow::Result;
-use ferromesh_store::{DirectMessage, Reception, StatusReport};
+use ferromesh_store::{Acknowledgement, DirectMessage, Reception, SentMessage, StatusReport};
 
 use crate::rawlog::RawRecord;
 use crate::{companion, meshcoretomqtt};
@@ -11,6 +11,10 @@ pub enum Message {
     Packet(Reception),
     Status(StatusReport),
     Direct(DirectMessage),
+    /// A message sent through a companion radio.
+    Sent(SentMessage),
+    /// A recipient acknowledged a direct message.
+    Ack(Acknowledgement),
     /// Something we keep in the raw log but don't store, such as an MQTT
     /// `debug` topic.
     Ignored,

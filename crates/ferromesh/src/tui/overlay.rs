@@ -186,6 +186,7 @@ const HELP: &[(&str, &str)] = &[
     ("Enter", "inspect the selected packet"),
     ("/", "filter this view, Esc clears it"),
     ("w", "watch a filter: highlight and alert"),
+    ("c", "compose to the selected channel"),
     ("d", "delete the selected watch"),
     ("c", "clear alerts"),
     ("b", "bell on or off"),

@@ -125,6 +125,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         let label = match input.prompt {
             Prompt::Filter => format!("filter {}: ", app.view.title().to_lowercase()),
             Prompt::Watch => "watch: ".to_owned(),
+            Prompt::Compose => format!("message {}: ", app.channel.as_deref().unwrap_or_default()),
         };
         let mut spans =
             vec![Span::styled(label, Style::new().bold().cyan()), Span::raw(&input.text)];
@@ -156,7 +157,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (None, Some(problem)) => Line::from(Span::styled(problem, Color::Red)),
         (None, None) => {
             let hints = match app.view {
-                View::Messages => "Tab channels  / filter  w watch  Enter inspect  ? help  q quit",
+                View::Messages => {
+                    "Tab channels  c compose  / filter  w watch  Enter inspect  ? help"
+                }
                 View::Packets | View::Rf => {
                     "/ filter  w watch  Enter inspect  g/G top/end  ? help  q quit"
                 }

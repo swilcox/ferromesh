@@ -130,6 +130,8 @@ pub struct Alert {
 pub enum Prompt {
     Filter,
     Watch,
+    /// A message to the selected channel.
+    Compose,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +161,11 @@ pub enum Command {
         filter: Option<String>,
     },
     SaveWatches(Vec<WatchConfig>),
+    /// Send through the server's companion radio.
+    Send {
+        to: String,
+        text: String,
+    },
 }
 
 /// News from the network side.
@@ -599,6 +606,7 @@ impl App {
                 self.alerts.clear();
                 self.alert_selected = 0;
             }
+            KeyCode::Char('c') if self.view == View::Messages => self.prompt(Prompt::Compose),
             _ => {}
         }
         Vec::new()
@@ -736,6 +744,14 @@ impl App {
             self.status = Some("watches apply to messages, packets and RF".into());
             return;
         }
+        if prompt == Prompt::Compose {
+            if self.channel.is_none() {
+                self.status = Some("pick a channel to send to first (Tab, then j/k)".into());
+            } else {
+                self.input = Some(Input { prompt, text: String::new(), error: None });
+            }
+            return;
+        }
         let text = match (prompt, self.filter_text(self.view), &self.channel) {
             (_, Some(text), _) => text.to_owned(),
             (Prompt::Watch, None, Some(channel)) if self.view == View::Messages => {
@@ -773,6 +789,16 @@ impl App {
         let text = input.text.trim().to_owned();
         let kind = self.view.kind();
         match input.prompt {
+            Prompt::Compose => {
+                let Some(channel) = self.channel.clone() else {
+                    return Vec::new();
+                };
+                if text.is_empty() {
+                    return Vec::new();
+                }
+                self.status = Some(format!("sending to {channel}…"));
+                vec![Command::Send { to: channel, text }]
+            }
             Prompt::Filter => {
                 if text.is_empty() {
                     self.filters.remove(&self.view);
@@ -1172,6 +1198,26 @@ mod tests {
         assert_eq!(app.hop_name("A1B2"), Some("Hilltop"));
         assert_eq!(app.hop_name("a1ff"), Some("Valley"));
         assert_eq!(app.hop_name("77"), None);
+    }
+
+    #[test]
+    fn composing_sends_to_the_selected_channel() {
+        let mut app = with_history(Vec::new());
+        press(&mut app, KeyCode::Char('c'));
+        assert!(app.input.is_none(), "no channel selected");
+        assert!(app.status.as_deref().unwrap().contains("pick a channel"));
+
+        app.select_channel(Some("#test".into()));
+        press(&mut app, KeyCode::Char('c'));
+        type_text(&mut app, "hello mesh");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            [Command::Send { to: "#test".into(), text: "hello mesh".into() }]
+        );
+        assert_eq!(app.status.as_deref(), Some("sending to #test…"));
+
+        press(&mut app, KeyCode::Char('c'));
+        assert_eq!(press(&mut app, KeyCode::Enter), [], "nothing to send");
     }
 
     #[test]

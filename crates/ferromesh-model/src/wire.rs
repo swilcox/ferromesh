@@ -19,6 +19,13 @@
 //! - `GET /api/v1/direct?limit=` returns
 //!   [`DirectMessageInfo`](crate::DirectMessageInfo)s sent to your companion
 //!   radio, newest first.
+//! - `POST /api/v1/send` with a [`SendRequest`](crate::SendRequest) and the
+//!   token sends through the companion radio, returning a
+//!   [`SentMessageInfo`](crate::SentMessageInfo).
+//! - `GET /api/v1/outbox?limit=` returns those, newest first.
+//! - `GET /api/v1/contacts` returns the companion radio's
+//!   [`RadioContact`](crate::RadioContact)s; `POST /api/v1/contacts` with a
+//!   [`PinRequest`](crate::PinRequest) and the token pins or unpins one.
 //!
 //! Errors are JSON `{"error": "..."}` with a matching HTTP status.
 

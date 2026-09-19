@@ -2,14 +2,17 @@
 
 mod channels;
 mod config;
+mod contacts;
 mod direct;
 mod render;
+mod send;
 mod server;
 mod tui;
 mod when;
 
 use std::io;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -91,6 +94,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Send through the server's companion radio (needs the token), then
+    /// follow the message: who heard it, or whether it was acknowledged.
+    Send {
+        /// A channel ('#test', or a private channel's name), or a node's
+        /// advertised name or a hex prefix of its key.
+        to: String,
+        /// The message; the words are joined with spaces.
+        #[arg(required = true)]
+        text: Vec<String>,
+        /// Seconds to follow the message afterwards; 0 returns at once.
+        #[arg(long, default_value_t = 20)]
+        follow: u64,
+    },
+    /// The companion radio's contacts, and pinning nodes so it keeps them.
+    /// Lists them by default.
+    Contacts {
+        #[command(subcommand)]
+        command: Option<ContactsCommand>,
+    },
     /// Direct messages sent to your companion radio, oldest first.
     Dms {
         /// How many of the newest to show (at most 1000).
@@ -119,6 +141,27 @@ enum Command {
         /// With --snapshot, the screen size. [default: 120x40]
         #[arg(long, requires = "snapshot", value_parser = parse_size)]
         size: Option<(u16, u16)>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContactsCommand {
+    /// List the radio's contacts, pinned ones first.
+    List {
+        /// Print one JSON contact per line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Keep a node as a contact for good, adding it if needed. People you
+    /// exchange direct messages with are pinned automatically.
+    Pin {
+        /// A node's advertised name, or a hex prefix of its key.
+        to: String,
+    },
+    /// Let the radio replace a node when it needs room.
+    Unpin {
+        /// A node's advertised name, or a hex prefix of its key.
+        to: String,
     },
 }
 
@@ -204,7 +247,17 @@ async fn run(cli: Cli) -> Result<()> {
             let window = (since.map(When::at), until.map(When::at));
             server::query(&server, kind, filter, limit, window, Printer::new(json)).await
         }
+        Command::Send { to, text, follow } => {
+            send::send(&server, to, text.join(" "), token, Duration::from_secs(follow)).await
+        }
         Command::Dms { limit, json } => direct::list(&server, limit, json).await,
+        Command::Contacts { command } => {
+            match command.unwrap_or(ContactsCommand::List { json: false }) {
+                ContactsCommand::List { json } => contacts::list(&server, json).await,
+                ContactsCommand::Pin { to } => contacts::pin(&server, to, true, token).await,
+                ContactsCommand::Unpin { to } => contacts::pin(&server, to, false, token).await,
+            }
+        }
         Command::Channels { command } => match command
             .unwrap_or(ChannelsCommand::List { json: false })
         {
@@ -224,7 +277,7 @@ async fn run(cli: Cli) -> Result<()> {
             } else {
                 None
             };
-            tui::run(server, snapshot).await
+            tui::run(server, token.map(str::to_owned), snapshot).await
         }
     }
 }

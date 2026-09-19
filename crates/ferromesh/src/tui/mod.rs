@@ -17,7 +17,10 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
-use ferromesh_model::{ChannelInfo, Event, HistoryQuery, Kind, MAX_NODES, NodeInfo, PacketDetail};
+use ferromesh_model::{
+    ChannelInfo, Event, HistoryQuery, Kind, MAX_NODES, NodeInfo, PacketDetail, SendRequest,
+    SentMessageInfo,
+};
 use futures_util::StreamExt;
 use jiff::Timestamp;
 use ratatui::backend::TestBackend;
@@ -46,7 +49,8 @@ pub struct Snapshot {
     pub keys: Vec<KeyEvent>,
 }
 
-pub async fn run(server: Server, snapshot: Option<Snapshot>) -> Result<()> {
+/// `token` is the server's API token, which sending needs.
+pub async fn run(server: Server, token: Option<String>, snapshot: Option<Snapshot>) -> Result<()> {
     let dir = config::dir();
     let watches = match &dir {
         Some(dir) => config::load_watches(dir)?,
@@ -62,10 +66,10 @@ pub async fn run(server: Server, snapshot: Option<Snapshot>) -> Result<()> {
     let result = match snapshot {
         // A snapshot never writes the watch file.
         Some(snapshot) => {
-            let network = Network { server, updates, dir: None };
+            let network = Network { server, updates, dir: None, token };
             snap(app, &network, received, snapshot).await
         }
-        None => interactive(app, &Network { server, updates, dir }, received).await,
+        None => interactive(app, &Network { server, updates, dir, token }, received).await,
     };
     streams.abort_all();
     result
@@ -206,6 +210,7 @@ struct Network {
     updates: UnboundedSender<Update>,
     /// Where watches are saved, if anywhere.
     dir: Option<PathBuf>,
+    token: Option<String>,
 }
 
 impl Network {
@@ -244,6 +249,19 @@ impl Network {
                     let _ =
                         updates.send(Update::Status(format!("couldn't save watches: {error:#}")));
                 }
+            }
+            Command::Send { to, text } => {
+                let token = self.token.clone();
+                tokio::spawn(async move {
+                    let request = SendRequest { to: to.clone(), text };
+                    let result: Result<SentMessageInfo> =
+                        server.post("/api/v1/send", &request, token.as_deref()).await;
+                    let status = match result {
+                        Ok(sent) => format!("sent to {to} as {}", sent.from),
+                        Err(error) => format!("couldn't send to {to}: {error:#}"),
+                    };
+                    let _ = updates.send(Update::Status(status));
+                });
             }
         }
     }

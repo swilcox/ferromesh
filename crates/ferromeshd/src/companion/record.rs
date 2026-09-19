@@ -1,13 +1,20 @@
 //! Companion frames as raw records, and back.
 //!
-//! Topics are `companion/<radio pubkey>/<rx|message|status>`. Packets and
-//! messages keep the radio's frame verbatim, in hex; status reports use the
-//! same JSON fields as observer firmware, plus the frames they came from.
+//! Topics are `companion/<radio pubkey>/<kind>`:
+//!
+//! - `rx`, `message` and `confirmed` keep the radio's frame verbatim, in hex:
+//!   a packet it heard, a queued message, an acknowledgement.
+//! - `status` uses the same JSON fields as observer firmware, plus the frames
+//!   they came from.
+//! - `sent` describes a message ferromesh asked the radio to send, and how
+//!   the radio answered.
 
 use anyhow::{Context, Result, bail};
-use ferromesh_store::{DirectMessage, ObserverInfo, Reception};
+use ferromesh_store::{
+    Acknowledgement, DirectMessage, ObserverInfo, Reception, SentMessage, SentTo,
+};
 use jiff::Timestamp;
-use meshcore_proto::companion::{Frame, Stats, code};
+use meshcore_proto::companion::{Contact, Frame, Sent, Stats, code};
 use serde_json::{Map, Value, json};
 
 use super::TOPIC_PREFIX;
@@ -26,6 +33,7 @@ pub fn received(identity: &Identity, source: &str, received: &Received) -> Optio
         | code::CHANNEL_MSG_RECV
         | code::CHANNEL_MSG_RECV_V3
         | code::CHANNEL_DATA_RECV => "message",
+        code::PUSH_SEND_CONFIRMED => "confirmed",
         _ => return None,
     };
     let payload =
@@ -69,6 +77,59 @@ pub fn status(identity: &Identity, source: &str, at: Timestamp, frames: &[Vec<u8
     record(identity, source, "status", at, payload)
 }
 
+/// A channel message ferromesh asked the radio to send. `error` says why
+/// it wasn't sent.
+#[allow(clippy::too_many_arguments)]
+pub fn sent_channel(
+    identity: &Identity,
+    source: &str,
+    at: Timestamp,
+    channel: &str,
+    text: &str,
+    sender_timestamp: u32,
+    packet_hash: &[u8; 8],
+    error: Option<&str>,
+) -> RawRecord {
+    let payload = json!({
+        "origin": identity.info.name,
+        "channel": channel,
+        "text": text,
+        "sender_timestamp": sender_timestamp,
+        "packet_hash": hex::encode_upper(packet_hash),
+        "error": error,
+    });
+    record(identity, source, "sent", at, payload)
+}
+
+/// A direct message ferromesh asked the radio to send, with the radio's
+/// answer or why it wasn't sent.
+pub fn sent_direct(
+    identity: &Identity,
+    source: &str,
+    at: Timestamp,
+    contact: &Contact,
+    text: &str,
+    sender_timestamp: u32,
+    result: Result<&Sent, &str>,
+) -> RawRecord {
+    let mut payload = json!({
+        "origin": identity.info.name,
+        "to": hex::encode_upper(contact.pubkey),
+        "to_name": (!contact.name.is_empty()).then_some(&contact.name),
+        "text": text,
+        "sender_timestamp": sender_timestamp,
+    });
+    match result {
+        Ok(sent) => {
+            payload["expected_ack"] = sent.expected_ack.into();
+            payload["timeout_ms"] = sent.timeout_ms.into();
+            payload["flood"] = sent.flood.into();
+        }
+        Err(error) => payload["error"] = error.into(),
+    }
+    record(identity, source, "sent", at, payload)
+}
+
 fn record(
     identity: &Identity,
     source: &str,
@@ -98,6 +159,9 @@ pub fn parse(record: &RawRecord) -> Result<Message> {
     if kind == "status" {
         return Ok(Message::Status(status_report(observer, at, &fields, &record.payload)));
     }
+    if kind == "sent" {
+        return Ok(Message::Sent(sent_message(observer, at, &fields)?));
+    }
     let frame = fields.get("frame").and_then(Value::as_str).context("no frame")?;
     let frame = hex::decode(frame).context("frame is not hex")?;
     match Frame::parse(&frame).context("unreadable frame")? {
@@ -121,10 +185,47 @@ pub fn parse(record: &RawRecord) -> Result<Message> {
             snr: message.snr,
             body: String::from_utf8_lossy(message.text).into_owned(),
         })),
+        Frame::SendConfirmed(confirmed) => Ok(Message::Ack(Acknowledgement {
+            observer,
+            at,
+            ack: confirmed.ack,
+            round_trip_ms: confirmed.round_trip_ms,
+        })),
         // The radio decrypts channels in its own slots, but the same packets
         // arrive as receptions and are decoded with the server's channels.
         _ => Ok(Message::Ignored),
     }
+}
+
+fn sent_message(
+    observer: ObserverInfo,
+    at: i64,
+    fields: &Map<String, Value>,
+) -> Result<SentMessage> {
+    let number = |key| fields.get(key).and_then(Value::as_u64).and_then(|n| u32::try_from(n).ok());
+    let to = match text(fields, "channel") {
+        Some(name) => {
+            let mut packet_hash = [0; 8];
+            let hash = text(fields, "packet_hash").context("no packet hash")?;
+            hex::decode_to_slice(&hash, &mut packet_hash).context("bad packet hash")?;
+            SentTo::Channel { name, packet_hash }
+        }
+        None => SentTo::Node {
+            pubkey: observer_key(&text(fields, "to").context("no recipient")?)?,
+            name: text(fields, "to_name"),
+            expected_ack: number("expected_ack"),
+            ack_timeout_ms: number("timeout_ms"),
+            flood: fields.get("flood").and_then(Value::as_bool),
+        },
+    };
+    Ok(SentMessage {
+        observer,
+        sent_at: at,
+        to,
+        body: text(fields, "text").context("no text")?,
+        sender_timestamp: number("sender_timestamp").context("no sender timestamp")?,
+        error: text(fields, "error"),
+    })
 }
 
 #[cfg(test)]
@@ -142,6 +243,7 @@ mod tests {
                 pubkey: [0xAB; 32],
                 lat_e6: 0,
                 lon_e6: 0,
+                manual_add_contacts: 0,
                 freq_khz: 910_525,
                 bandwidth_hz: 62_500,
                 spreading_factor: 7,
@@ -227,6 +329,57 @@ mod tests {
         );
         assert_eq!((report.packets_received, report.recv_errors), (Some(27), Some(1)));
         assert_eq!(report.raw, record.payload);
+    }
+
+    #[test]
+    fn sends_and_acknowledgements() {
+        let record =
+            sent_channel(&identity(), "companion:test", at(), "#test", "hi", 7, &[1; 8], None);
+        assert!(record.topic.ends_with("/sent"));
+        let Message::Sent(sent) = parse(&record).unwrap() else { panic!() };
+        assert_eq!(sent.to, SentTo::Channel { name: "#test".into(), packet_hash: [1; 8] });
+        assert_eq!((sent.body.as_str(), sent.sender_timestamp, sent.error), ("hi", 7, None));
+
+        let contact = Contact {
+            pubkey: [3; 32],
+            kind: 1,
+            flags: 0,
+            out_path_len: None,
+            out_path: Vec::new(),
+            name: "KK4SW".into(),
+            last_advert: 0,
+            lat_e6: 0,
+            lon_e6: 0,
+        };
+        let accepted = Sent { flood: true, expected_ack: 0xDEAD_BEEF, timeout_ms: 4000 };
+        let record =
+            sent_direct(&identity(), "companion:test", at(), &contact, "yo", 8, Ok(&accepted));
+        let Message::Sent(sent) = parse(&record).unwrap() else { panic!() };
+        assert_eq!(
+            sent.to,
+            SentTo::Node {
+                pubkey: [3; 32],
+                name: Some("KK4SW".into()),
+                expected_ack: Some(0xDEAD_BEEF),
+                ack_timeout_ms: Some(4000),
+                flood: Some(true),
+            }
+        );
+        let record =
+            sent_direct(&identity(), "companion:test", at(), &contact, "yo", 9, Err("table full"));
+        let Message::Sent(sent) = parse(&record).unwrap() else { panic!() };
+        assert_eq!(sent.error.as_deref(), Some("table full"));
+
+        let confirmed = [
+            &[code::PUSH_SEND_CONFIRMED][..],
+            &0xDEAD_BEEFu32.to_le_bytes(),
+            &900u32.to_le_bytes(),
+        ]
+        .concat();
+        let (record, message) = round_trip(confirmed);
+        assert!(record.topic.ends_with("/confirmed"));
+        let Message::Ack(ack) = message else { panic!("{message:?}") };
+        assert_eq!((ack.ack, ack.round_trip_ms), (0xDEAD_BEEF, 900));
     }
 
     #[test]

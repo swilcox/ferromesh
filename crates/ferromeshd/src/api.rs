@@ -14,14 +14,20 @@ use axum::{Json, Router};
 use ferromesh_model::{
     AddChannel, ChannelInfo, DEFAULT_HISTORY_LIMIT, DirectMessageInfo, DirectQuery, Event, Filter,
     Frame, GuessChannels, GuessReport, Health, HistoryQuery, Kind, MAX_DIRECT, MAX_HISTORY_LIMIT,
-    MAX_NODES, NodeInfo, NodesQuery, PacketDetail, StreamQuery, UnknownChannel,
+    MAX_NODES, MAX_OUTBOX, NodeInfo, NodesQuery, OutboxQuery, PacketDetail, PinRequest,
+    RadioContact, SendRequest, SentMessageInfo, StreamQuery, UnknownChannel,
 };
-use ferromesh_store::{Micros, Order, Page, Reader};
+use ferromesh_store::{Micros, Order, Page, Reader, SendTarget};
+use jiff::Timestamp;
+use meshcore_proto::NodeRole;
+use meshcore_proto::companion::Contact;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, warn};
 
+use crate::companion::contacts::contact_from;
+use crate::companion::{Accepted, Request, SendError};
 use crate::pipeline::{self, AddOutcome};
 use crate::writer::Job;
 
@@ -40,6 +46,8 @@ pub struct AppState {
     writer: Option<mpsc::Sender<Job>>,
     /// The bearer token changes require; without it changes are refused.
     token: Option<Arc<str>>,
+    /// The companion radio, for sending; without it sending is refused.
+    companion: Option<std::sync::mpsc::Sender<Request>>,
 }
 
 impl AppState {
@@ -50,7 +58,14 @@ impl AppState {
         events: broadcast::Sender<Arc<Event>>,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
-        Self { db_path: Arc::new(db_path), events, shutdown, writer: None, token: None }
+        Self {
+            db_path: Arc::new(db_path),
+            events,
+            shutdown,
+            writer: None,
+            token: None,
+            companion: None,
+        }
     }
 
     /// Accepts changes, handed to the writer thread, from clients presenting
@@ -58,6 +73,12 @@ impl AppState {
     pub fn with_writer(mut self, writer: mpsc::Sender<Job>, token: Option<String>) -> Self {
         self.writer = Some(writer);
         self.token = token.map(Arc::from);
+        self
+    }
+
+    /// Sends messages through a companion radio, for clients with the token.
+    pub fn with_companion(mut self, requests: std::sync::mpsc::Sender<Request>) -> Self {
+        self.companion = Some(requests);
         self
     }
 }
@@ -72,6 +93,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/nodes", get(list_nodes))
         .route("/api/v1/packets/{hash}", get(packet_detail))
         .route("/api/v1/direct", get(list_direct))
+        .route("/api/v1/send", post(send_message))
+        .route("/api/v1/outbox", get(list_outbox))
+        .route("/api/v1/contacts", get(list_contacts).post(pin_contact))
         .route("/api/v1/{kind}", get(history))
         .with_state(state)
 }
@@ -182,6 +206,191 @@ async fn add_channel(
         )),
         Err(error) => Err(ApiError::internal(error)),
     }
+}
+
+/// How long to wait for the radio to take a message. Giving a channel a slot
+/// first means reading every slot, which takes a few seconds.
+const SEND_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn send_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<SendRequest>,
+) -> Result<Response, ApiError> {
+    authorize(&state, &headers)?;
+    let unavailable = |message: &str| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, message);
+    let companion = state.companion.clone().ok_or_else(|| {
+        unavailable("this server has no companion radio: add a [companion] section to its config")
+    })?;
+    let writer =
+        state.writer.clone().ok_or_else(|| unavailable("the server can't make changes"))?;
+    let to = request.to.trim().to_owned();
+    let lookup = to.clone();
+    let target = read(&state, move |reader| reader.send_target(&lookup)).await?;
+
+    let (reply, answer) = oneshot::channel();
+    let text = request.text;
+    let request = match target {
+        SendTarget::Channel { name, secret } => {
+            let secret = secret.as_slice().try_into().map_err(|_| {
+                ApiError::new(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "{name} has a 32-byte key, and companion radios only take 16-byte ones"
+                    ),
+                )
+            })?;
+            Request::Channel { name, secret, text, reply }
+        }
+        SendTarget::Node(node) => Request::Direct { contact: contact_from(&node), text, reply },
+        SendTarget::Ambiguous(matches) => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("{to:?} matches {}; give more of the key", matches.join(", ")),
+            ));
+        }
+        SendTarget::Unknown => {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                format!(
+                    "no channel or node is called {to:?}: add channels first, and a node must \
+                     have been heard advertising"
+                ),
+            ));
+        }
+    };
+    companion.send(request).map_err(|_| unavailable("the companion radio has stopped"))?;
+    let answer = tokio::time::timeout(SEND_TIMEOUT, answer)
+        .await
+        .map_err(|_| {
+            ApiError::new(StatusCode::GATEWAY_TIMEOUT, "the companion radio didn't answer")
+        })?
+        .map_err(|_| unavailable("the companion radio has stopped"))?;
+    // For anything that reached the radio, sent or refused, the radio thread
+    // queued an outbox record before answering. Once the writer has caught
+    // up, the outbox shows it.
+    if matches!(answer, Ok(_) | Err(SendError::Failed(_))) {
+        let (synced, done) = oneshot::channel();
+        writer
+            .send(Job::Sync(synced))
+            .await
+            .map_err(|_| unavailable("the server can't make changes"))?;
+        done.await.map_err(|_| unavailable("the server can't make changes"))?;
+    }
+    let sender_timestamp = match answer {
+        Ok(Accepted { sender_timestamp }) => sender_timestamp,
+        Err(SendError::Invalid(problem)) => {
+            return Err(ApiError::new(StatusCode::BAD_REQUEST, problem));
+        }
+        Err(SendError::Unavailable(problem)) => return Err(unavailable(&problem)),
+        Err(SendError::Failed(problem)) => {
+            return Err(ApiError::new(StatusCode::BAD_GATEWAY, problem));
+        }
+    };
+    let now = Timestamp::now().as_microsecond();
+    let outbox = read(&state, move |reader| reader.outbox(100, now)).await?;
+    let entry = outbox
+        .into_iter()
+        .find(|entry| entry.sender_timestamp.as_second() == i64::from(sender_timestamp))
+        .ok_or_else(|| {
+            ApiError::internal(anyhow::anyhow!("the sent message is missing from the outbox"))
+        })?;
+    Ok((StatusCode::CREATED, Json(entry)).into_response())
+}
+
+async fn list_contacts(State(state): State<AppState>) -> Result<Json<Vec<RadioContact>>, ApiError> {
+    let mut contacts: Vec<RadioContact> = ask_radio(&state, |reply| Request::Contacts { reply })
+        .await?
+        .iter()
+        .map(radio_contact)
+        .collect();
+    contacts.sort_by(|a, b| b.favourite.cmp(&a.favourite).then_with(|| a.name.cmp(&b.name)));
+    Ok(Json(contacts))
+}
+
+async fn pin_contact(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<PinRequest>,
+) -> Result<Json<RadioContact>, ApiError> {
+    authorize(&state, &headers)?;
+    let to = request.to.trim().to_owned();
+    let lookup = to.clone();
+    let node = match read(&state, move |reader| reader.send_target(&lookup)).await? {
+        SendTarget::Node(node) => node,
+        SendTarget::Channel { name, .. } => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("{name} is a channel, not a node"),
+            ));
+        }
+        SendTarget::Ambiguous(matches) => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                format!("{to:?} matches {}; give more of the key", matches.join(", ")),
+            ));
+        }
+        SendTarget::Unknown => {
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                format!("no node called {to:?} has been heard advertising"),
+            ));
+        }
+    };
+    let contact = contact_from(&node);
+    let pinned = request.pinned;
+    let held = ask_radio(&state, |reply| Request::Pin { contact, pinned, reply }).await?;
+    Ok(Json(radio_contact(&held)))
+}
+
+/// Hands a request to the companion radio's thread and waits for its answer.
+async fn ask_radio<T>(
+    state: &AppState,
+    request: impl FnOnce(oneshot::Sender<Result<T, SendError>>) -> Request,
+) -> Result<T, ApiError> {
+    let unavailable = |message: &str| ApiError::new(StatusCode::SERVICE_UNAVAILABLE, message);
+    let companion = state.companion.clone().ok_or_else(|| {
+        unavailable("this server has no companion radio: add a [companion] section to its config")
+    })?;
+    let (reply, answer) = oneshot::channel();
+    companion.send(request(reply)).map_err(|_| unavailable("the companion radio has stopped"))?;
+    match tokio::time::timeout(SEND_TIMEOUT, answer).await {
+        Err(_) => {
+            Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "the companion radio didn't answer"))
+        }
+        Ok(Err(_)) => Err(unavailable("the companion radio has stopped")),
+        Ok(Ok(Ok(value))) => Ok(value),
+        Ok(Ok(Err(SendError::Invalid(problem)))) => {
+            Err(ApiError::new(StatusCode::BAD_REQUEST, problem))
+        }
+        Ok(Ok(Err(SendError::Unavailable(problem)))) => Err(unavailable(&problem)),
+        Ok(Ok(Err(SendError::Failed(problem)))) => {
+            Err(ApiError::new(StatusCode::BAD_GATEWAY, problem))
+        }
+    }
+}
+
+fn radio_contact(contact: &Contact) -> RadioContact {
+    RadioContact {
+        pubkey: hex::encode(contact.pubkey),
+        name: contact.name.clone(),
+        kind: NodeRole::from_flags(contact.kind).name().to_owned(),
+        favourite: contact.is_favourite(),
+        last_advert: (contact.last_advert > 0)
+            .then(|| Timestamp::from_second(i64::from(contact.last_advert)).ok())
+            .flatten(),
+        // The length byte's low six bits count the hops.
+        route_hops: contact.out_path_len.map(|len| len & 0x3F),
+    }
+}
+
+async fn list_outbox(
+    State(state): State<AppState>,
+    Query(query): Query<OutboxQuery>,
+) -> Result<Json<Vec<SentMessageInfo>>, ApiError> {
+    let limit = query.limit.unwrap_or(DEFAULT_HISTORY_LIMIT).clamp(1, MAX_OUTBOX);
+    let now = Timestamp::now().as_microsecond();
+    Ok(Json(read(&state, move |reader| reader.outbox(limit, now)).await?))
 }
 
 /// Changes need the configured bearer token; with none configured they're off.

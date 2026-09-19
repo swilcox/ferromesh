@@ -79,6 +79,46 @@ pub struct DirectMessage {
     pub body: String,
 }
 
+/// A message sent through a companion radio: to a channel or to one node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentMessage {
+    /// The companion radio that sent it.
+    pub observer: ObserverInfo,
+    pub sent_at: Micros,
+    pub to: SentTo,
+    pub body: String,
+    /// The timestamp inside the message, which makes each send unique.
+    pub sender_timestamp: u32,
+    /// Why the radio refused it; `None` if it was transmitted.
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SentTo {
+    Channel {
+        name: String,
+        /// The hash the packet has on the air.
+        packet_hash: [u8; 8],
+    },
+    Node {
+        pubkey: [u8; 32],
+        name: Option<String>,
+        /// The acknowledgement code to expect, once the radio has sent it.
+        expected_ack: Option<u32>,
+        ack_timeout_ms: Option<u32>,
+        flood: Option<bool>,
+    },
+}
+
+/// A recipient's acknowledgement of a direct message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Acknowledgement {
+    pub observer: ObserverInfo,
+    pub at: Micros,
+    pub ack: u32,
+    pub round_trip_ms: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
     /// A new observation; `new_packet` is false if another copy was stored first.
@@ -265,6 +305,67 @@ impl<'a> Batch<'a> {
                 Ok(true)
             }
         }
+    }
+
+    /// Returns false if this send was already stored.
+    pub fn record_sent(&mut self, message: &SentMessage) -> Result<bool> {
+        let observer_id = self.upsert_observer(&message.observer, message.sent_at)?;
+        let (channel, packet_hash, recipient, recipient_name, expected_ack, timeout, flood) =
+            match &message.to {
+                SentTo::Channel { name, packet_hash } => {
+                    (Some(name), Some(packet_hash.as_slice()), None, None, None, None, None)
+                }
+                SentTo::Node { pubkey, name, expected_ack, ack_timeout_ms, flood } => (
+                    None,
+                    None,
+                    Some(pubkey.as_slice()),
+                    name.as_ref(),
+                    *expected_ack,
+                    *ack_timeout_ms,
+                    *flood,
+                ),
+            };
+        let inserted = self
+            .tx
+            .prepare_cached(
+                "INSERT INTO sent_messages (observer_id, sent_at, channel, recipient, recipient_name,
+                                            body, sender_timestamp, packet_hash, expected_ack,
+                                            ack_timeout_ms, flood, error)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                 ON CONFLICT (observer_id, sender_timestamp, body) DO NOTHING",
+            )?
+            .execute(params![
+                observer_id,
+                message.sent_at,
+                channel,
+                recipient,
+                recipient_name,
+                message.body,
+                message.sender_timestamp,
+                packet_hash,
+                expected_ack,
+                timeout,
+                flood,
+                message.error,
+            ])?;
+        Ok(inserted > 0)
+    }
+
+    /// Marks the newest unacknowledged send expecting this code as delivered.
+    /// Returns false if none matched, such as for a repeated acknowledgement.
+    pub fn record_ack(&mut self, ack: &Acknowledgement) -> Result<bool> {
+        let observer_id = self.upsert_observer(&ack.observer, ack.at)?;
+        let updated = self
+            .tx
+            .prepare_cached(
+                "UPDATE sent_messages SET acked_at = ?3, round_trip_ms = ?4
+                 WHERE id = (SELECT id FROM sent_messages
+                             WHERE observer_id = ?1 AND expected_ack = ?2 AND acked_at IS NULL
+                               AND error IS NULL AND sent_at <= ?3
+                             ORDER BY sent_at DESC LIMIT 1)",
+            )?
+            .execute(params![observer_id, ack.ack, ack.at, ack.round_trip_ms])?;
+        Ok(updated > 0)
     }
 
     /// Tries `key` on up to `limit` undecrypted packets carrying its hash,

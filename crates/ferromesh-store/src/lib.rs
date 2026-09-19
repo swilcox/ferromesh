@@ -28,8 +28,12 @@ use ferromesh_model::{
 use meshcore_proto::ChannelKey;
 use rusqlite::{Connection, params};
 
+pub use detail::{NodeContact, SendTarget};
 pub use guess::BUILTIN_NAMES;
-pub use ingest::{Batch, DirectMessage, ObserverInfo, Outcome, Reception, StatusReport};
+pub use ingest::{
+    Acknowledgement, Batch, DirectMessage, ObserverInfo, Outcome, Reception, SentMessage, SentTo,
+    StatusReport,
+};
 pub use read::{Order, Page, Reader};
 
 /// Microseconds since the Unix epoch, UTC.
@@ -107,6 +111,7 @@ pub struct Counts {
     pub nodes: i64,
     pub channels: i64,
     pub direct_messages: i64,
+    pub sent_messages: i64,
 }
 
 /// The ids that committed writes created, per kind, in insertion order.
@@ -310,6 +315,19 @@ impl Store {
         detail::direct_messages(&self.conn, limit)
     }
 
+    /// Sent messages, newest first, with status as of `now`.
+    pub fn outbox(
+        &self,
+        limit: usize,
+        now: Micros,
+    ) -> Result<Vec<ferromesh_model::SentMessageInfo>> {
+        detail::outbox(&self.conn, limit, now)
+    }
+
+    pub fn send_target(&self, to: &str) -> Result<SendTarget> {
+        detail::send_target(&self.conn, to)
+    }
+
     pub fn packet_detail(&self, hash: &[u8]) -> Result<Option<ferromesh_model::PacketDetail>> {
         detail::packet_detail(&self.conn, hash)
     }
@@ -325,7 +343,8 @@ impl Store {
                     (SELECT count(*) FROM adverts),
                     (SELECT count(*) FROM nodes),
                     (SELECT count(*) FROM channels),
-                    (SELECT count(*) FROM direct_messages)",
+                    (SELECT count(*) FROM direct_messages),
+                    (SELECT count(*) FROM sent_messages)",
             [],
             |row| {
                 Ok(Counts {
@@ -339,6 +358,7 @@ impl Store {
                     nodes: row.get(7)?,
                     channels: row.get(8)?,
                     direct_messages: row.get(9)?,
+                    sent_messages: row.get(10)?,
                 })
             },
         )?)

@@ -66,6 +66,26 @@ impl Reader {
     pub fn direct_messages(&self, limit: usize) -> Result<Vec<ferromesh_model::DirectMessageInfo>> {
         crate::detail::direct_messages(&self.conn, limit)
     }
+
+    /// Sent messages, newest first, with status as of `now`.
+    pub fn outbox(
+        &self,
+        limit: usize,
+        now: Micros,
+    ) -> Result<Vec<ferromesh_model::SentMessageInfo>> {
+        crate::detail::outbox(&self.conn, limit, now)
+    }
+
+    /// Nodes whose key starts with `prefix`, most recently heard first; at
+    /// most 10.
+    pub fn nodes_by_key_prefix(&self, prefix: &[u8]) -> Result<Vec<crate::NodeContact>> {
+        crate::detail::nodes_by_key_prefix(&self.conn, prefix)
+    }
+
+    /// What a send's `to` names: a channel, or a node.
+    pub fn send_target(&self, to: &str) -> Result<crate::SendTarget> {
+        crate::detail::send_target(&self.conn, to)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

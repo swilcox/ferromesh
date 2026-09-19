@@ -171,6 +171,32 @@ CREATE TABLE direct_messages (
 );
 CREATE INDEX direct_messages_by_time ON direct_messages (received_at);
 "#,
+    r#"
+-- What was sent through a companion radio (observer_id). Channel messages
+-- carry the hash their packet will have, so observers' receptions show who
+-- heard them; direct messages carry the acknowledgement code to expect.
+-- error is set when the radio refused the message.
+CREATE TABLE sent_messages (
+    id               INTEGER PRIMARY KEY,
+    observer_id      INTEGER NOT NULL REFERENCES observers (id),
+    sent_at          INTEGER NOT NULL,
+    channel          TEXT,
+    recipient        BLOB,
+    recipient_name   TEXT,
+    body             TEXT NOT NULL,
+    sender_timestamp INTEGER NOT NULL,
+    packet_hash      BLOB,
+    expected_ack     INTEGER,
+    ack_timeout_ms   INTEGER,
+    flood            INTEGER,
+    error            TEXT,
+    acked_at         INTEGER,
+    round_trip_ms    INTEGER,
+    UNIQUE (observer_id, sender_timestamp, body)
+);
+CREATE INDEX sent_messages_by_time ON sent_messages (sent_at);
+CREATE INDEX sent_messages_by_ack ON sent_messages (observer_id, expected_ack);
+"#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {

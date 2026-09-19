@@ -6,7 +6,7 @@
 //! to app. A frame's first byte says what it is. Layouts follow the firmware's
 //! `examples/companion_radio/MyMesh.cpp`.
 //!
-//! None of the commands built here makes the radio transmit.
+//! Only [`send_text`] and [`send_channel_text`] make the radio transmit.
 
 use crate::error::Result;
 use crate::reader::Reader;
@@ -15,6 +15,13 @@ use crate::reader::Reader;
 /// [`device_query`]) makes it send the v3 message frames, which carry SNR.
 pub const APP_VERSION: u8 = 3;
 
+/// The longest message text the firmware sends. A channel message's text
+/// also holds the sender's name and `": "`.
+pub const MAX_TEXT_LEN: usize = 160;
+
+/// The length of a contact's stored path.
+const MAX_PATH_SIZE: usize = 64;
+
 /// A length beyond any real frame (the firmware's limit is under 256), so the
 /// reader must be out of step with the stream.
 const MAX_FRAME: usize = 1024;
@@ -22,10 +29,21 @@ const MAX_FRAME: usize = 1024;
 /// Command codes, the first byte of a frame sent to the radio.
 pub mod command {
     pub const APP_START: u8 = 1;
+    pub const SEND_TXT_MSG: u8 = 2;
+    pub const SEND_CHANNEL_TXT_MSG: u8 = 3;
+    pub const GET_CONTACTS: u8 = 4;
     pub const GET_DEVICE_TIME: u8 = 5;
+    pub const SET_DEVICE_TIME: u8 = 6;
+    pub const ADD_UPDATE_CONTACT: u8 = 9;
     pub const SYNC_NEXT_MESSAGE: u8 = 10;
     pub const DEVICE_QUERY: u8 = 22;
+    pub const GET_CONTACT_BY_KEY: u8 = 30;
+    pub const GET_CHANNEL: u8 = 31;
+    pub const SET_CHANNEL: u8 = 32;
+    pub const SET_OTHER_PARAMS: u8 = 38;
     pub const GET_STATS: u8 = 56;
+    pub const SET_AUTOADD_CONFIG: u8 = 58;
+    pub const GET_AUTOADD_CONFIG: u8 = 59;
 }
 
 /// Codes of frames from the radio. Replies answer the latest command; pushes
@@ -33,7 +51,11 @@ pub mod command {
 pub mod code {
     pub const OK: u8 = 0;
     pub const ERR: u8 = 1;
+    pub const CONTACTS_START: u8 = 2;
+    pub const CONTACT: u8 = 3;
+    pub const END_OF_CONTACTS: u8 = 4;
     pub const SELF_INFO: u8 = 5;
+    pub const SENT: u8 = 6;
     pub const CONTACT_MSG_RECV: u8 = 7;
     pub const CHANNEL_MSG_RECV: u8 = 8;
     pub const CURR_TIME: u8 = 9;
@@ -41,16 +63,55 @@ pub mod code {
     pub const DEVICE_INFO: u8 = 13;
     pub const CONTACT_MSG_RECV_V3: u8 = 16;
     pub const CHANNEL_MSG_RECV_V3: u8 = 17;
+    pub const CHANNEL_INFO: u8 = 18;
     pub const STATS: u8 = 24;
+    pub const AUTOADD_CONFIG: u8 = 25;
     pub const CHANNEL_DATA_RECV: u8 = 27;
 
     pub const PUSH_ADVERT: u8 = 0x80;
+    pub const PUSH_SEND_CONFIRMED: u8 = 0x82;
     pub const PUSH_MSG_WAITING: u8 = 0x83;
     pub const PUSH_LOG_RX_DATA: u8 = 0x88;
     pub const PUSH_NEW_ADVERT: u8 = 0x8A;
+    pub const PUSH_CONTACT_DELETED: u8 = 0x8F;
+    pub const PUSH_CONTACTS_FULL: u8 = 0x90;
 
     pub const fn is_push(code: u8) -> bool {
         code >= 0x80
+    }
+}
+
+/// Bits of the auto-add policy, which applies once automatic adding of every
+/// node is turned off ([`set_manual_add_contacts`]).
+pub mod autoadd {
+    /// When the contact table is full, replace the contact heard from least
+    /// recently, unless it's a favourite.
+    pub const OVERWRITE_OLDEST: u8 = 0x01;
+    pub const CHAT: u8 = 0x02;
+    pub const REPEATER: u8 = 0x04;
+    pub const ROOM_SERVER: u8 = 0x08;
+    pub const SENSOR: u8 = 0x10;
+}
+
+/// Error codes in [`Frame::Err`].
+pub mod error {
+    pub const UNSUPPORTED: u8 = 1;
+    pub const NOT_FOUND: u8 = 2;
+    pub const TABLE_FULL: u8 = 3;
+    pub const BAD_STATE: u8 = 4;
+    pub const FILE_IO: u8 = 5;
+    pub const ILLEGAL_ARG: u8 = 6;
+
+    pub const fn describe(code: u8) -> &'static str {
+        match code {
+            UNSUPPORTED => "unsupported command",
+            NOT_FOUND => "not found",
+            TABLE_FULL => "table full",
+            BAD_STATE => "bad state",
+            FILE_IO => "storage error",
+            ILLEGAL_ARG => "invalid argument",
+            _ => "unknown error",
+        }
     }
 }
 
@@ -92,6 +153,106 @@ pub fn sync_next_message() -> Vec<u8> {
 
 pub fn get_device_time() -> Vec<u8> {
     vec![command::GET_DEVICE_TIME]
+}
+
+/// Sets the radio's clock, in Unix seconds. The firmware refuses to move it
+/// backwards.
+pub fn set_device_time(secs: u32) -> Vec<u8> {
+    [&[command::SET_DEVICE_TIME][..], &secs.to_le_bytes()].concat()
+}
+
+/// Transmits `text` on the channel in `slot`, stamped `timestamp`. The radio
+/// sends `<its name>: <text>` and replies [`Frame::Ok`].
+pub fn send_channel_text(slot: u8, timestamp: u32, text: &str) -> Vec<u8> {
+    [
+        &[command::SEND_CHANNEL_TXT_MSG, txt_type::PLAIN, slot][..],
+        &timestamp.to_le_bytes(),
+        text.as_bytes(),
+    ]
+    .concat()
+}
+
+/// Transmits a direct message to the contact whose key starts with
+/// `recipient`. The reply is [`Frame::Sent`], and the recipient's
+/// acknowledgement arrives later as [`Frame::SendConfirmed`].
+pub fn send_text(recipient: &[u8; 6], attempt: u8, timestamp: u32, text: &str) -> Vec<u8> {
+    [
+        &[command::SEND_TXT_MSG, txt_type::PLAIN, attempt][..],
+        &timestamp.to_le_bytes(),
+        recipient,
+        text.as_bytes(),
+    ]
+    .concat()
+}
+
+/// The reply is [`Frame::ChannelInfo`]; unused slots have an empty name and
+/// a zero secret.
+pub fn get_channel(slot: u8) -> Vec<u8> {
+    vec![command::GET_CHANNEL, slot]
+}
+
+pub fn set_channel(slot: u8, name: &str, secret: &[u8; 16]) -> Vec<u8> {
+    [&[command::SET_CHANNEL, slot][..], &padded::<32>(name), secret].concat()
+}
+
+/// Lists the radio's contacts: [`Frame::ContactsStart`], a [`Frame::Contact`]
+/// for each, then [`Frame::EndOfContacts`].
+pub fn get_contacts() -> Vec<u8> {
+    vec![command::GET_CONTACTS]
+}
+
+/// With `manual` on, only the node types in the auto-add policy are added
+/// when their adverts are heard; with it off, every node is. Leaves the
+/// radio's other settings alone.
+pub fn set_manual_add_contacts(manual: bool) -> Vec<u8> {
+    vec![command::SET_OTHER_PARAMS, u8::from(manual)]
+}
+
+/// The reply is [`Frame::AutoAddConfig`].
+pub fn get_autoadd_config() -> Vec<u8> {
+    vec![command::GET_AUTOADD_CONFIG]
+}
+
+/// `policy` is a combination of [`autoadd`] bits. `max_hops` limits adding to
+/// nodes that close: 0 for no limit, 1 for direct neighbours only.
+pub fn set_autoadd_config(policy: u8, max_hops: u8) -> Vec<u8> {
+    vec![command::SET_AUTOADD_CONFIG, policy, max_hops]
+}
+
+/// The reply is [`Frame::Contact`], or [`Frame::Err`] with
+/// [`error::NOT_FOUND`].
+pub fn get_contact(pubkey: &[u8; 32]) -> Vec<u8> {
+    [&[command::GET_CONTACT_BY_KEY][..], pubkey].concat()
+}
+
+/// Adds the contact, or updates it if the radio already has its key.
+pub fn add_update_contact(contact: &Contact) -> Vec<u8> {
+    let mut path = [0u8; MAX_PATH_SIZE];
+    let len = contact.out_path.len().min(MAX_PATH_SIZE);
+    path[..len].copy_from_slice(&contact.out_path[..len]);
+    [
+        &[command::ADD_UPDATE_CONTACT][..],
+        &contact.pubkey,
+        &[contact.kind, contact.flags, contact.out_path_len.unwrap_or(0xFF)],
+        &path,
+        &padded::<32>(&contact.name),
+        &contact.last_advert.to_le_bytes(),
+        &contact.lat_e6.to_le_bytes(),
+        &contact.lon_e6.to_le_bytes(),
+    ]
+    .concat()
+}
+
+/// `text` as a NUL-terminated field of `N` bytes, cut at a character
+/// boundary if it's too long.
+fn padded<const N: usize>(text: &str) -> [u8; N] {
+    let mut field = [0u8; N];
+    let mut end = text.len().min(N - 1);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    field[..end].copy_from_slice(&text.as_bytes()[..end]);
+    field
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +320,17 @@ pub enum Frame<'a> {
     DeviceInfo(DeviceInfo),
     /// The radio's clock, in Unix seconds.
     CurrentTime(u32),
+    ChannelInfo(ChannelInfo),
+    /// How many contacts [`get_contacts`] is about to list.
+    ContactsStart(u32),
+    Contact(Contact),
+    EndOfContacts,
+    AutoAddConfig {
+        policy: u8,
+        max_hops: u8,
+    },
+    Sent(Sent),
+    SendConfirmed(SendConfirmed),
     NoMoreMessages,
     ContactMessage(ContactMessage<'a>),
     ChannelMessage(ChannelMessage<'a>),
@@ -178,6 +350,23 @@ impl<'a> Frame<'a> {
             code::SELF_INFO => Self::SelfInfo(SelfInfo::read(&mut r)?),
             code::DEVICE_INFO => Self::DeviceInfo(DeviceInfo::read(&mut r)?),
             code::CURR_TIME => Self::CurrentTime(r.u32_le()?),
+            code::CHANNEL_INFO => Self::ChannelInfo(ChannelInfo {
+                slot: r.u8()?,
+                name: text(r.take(32)?),
+                secret: *r.array()?,
+            }),
+            code::CONTACTS_START => Self::ContactsStart(r.u32_le()?),
+            code::CONTACT => Self::Contact(Contact::read(&mut r)?),
+            code::END_OF_CONTACTS => Self::EndOfContacts,
+            code::AUTOADD_CONFIG => Self::AutoAddConfig { policy: r.u8()?, max_hops: r.u8()? },
+            code::SENT => Self::Sent(Sent {
+                flood: r.u8()? != 0,
+                expected_ack: r.u32_le()?,
+                timeout_ms: r.u32_le()?,
+            }),
+            code::PUSH_SEND_CONFIRMED => {
+                Self::SendConfirmed(SendConfirmed { ack: r.u32_le()?, round_trip_ms: r.u32_le()? })
+            }
             code::NO_MORE_MESSAGES => Self::NoMoreMessages,
             code::CONTACT_MSG_RECV => Self::ContactMessage(ContactMessage::read(&mut r, None)?),
             code::CONTACT_MSG_RECV_V3 => {
@@ -226,6 +415,9 @@ pub struct SelfInfo {
     pub pubkey: [u8; 32],
     pub lat_e6: i32,
     pub lon_e6: i32,
+    /// 0: every node is added as a contact when heard; 1: only the types in
+    /// the auto-add policy.
+    pub manual_add_contacts: u8,
     pub freq_khz: u32,
     pub bandwidth_hz: u32,
     pub spreading_factor: u8,
@@ -238,8 +430,9 @@ impl SelfInfo {
         let (advert_type, tx_power_dbm, max_tx_power_dbm) = (r.u8()?, r.u8()?, r.u8()?);
         let pubkey = *r.array()?;
         let (lat_e6, lon_e6) = (r.i32_le()?, r.i32_le()?);
-        // Multi-acks, advert location policy, telemetry modes, manual add.
-        r.take(4)?;
+        // Multi-acks, advert location policy, telemetry modes.
+        r.take(3)?;
+        let manual_add_contacts = r.u8()?;
         let (freq_khz, bandwidth_hz) = (r.u32_le()?, r.u32_le()?);
         let (spreading_factor, coding_rate) = (r.u8()?, r.u8()?);
         Ok(Self {
@@ -249,6 +442,7 @@ impl SelfInfo {
             pubkey,
             lat_e6,
             lon_e6,
+            manual_add_contacts,
             freq_khz,
             bandwidth_hz,
             spreading_factor,
@@ -297,6 +491,85 @@ impl DeviceInfo {
             version: text(r.take(20)?),
         })
     }
+}
+
+/// A channel slot on the radio.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelInfo {
+    pub slot: u8,
+    pub name: String,
+    pub secret: [u8; 16],
+}
+
+impl ChannelInfo {
+    pub fn is_empty(&self) -> bool {
+        self.name.is_empty() && self.secret == [0; 16]
+    }
+}
+
+/// A node in the radio's contact list. The radio needs a node as a contact
+/// to decrypt its direct messages or send it one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Contact {
+    pub pubkey: [u8; 32],
+    /// The advert type: 1 chat, 2 repeater, 3 room server, 4 sensor.
+    pub kind: u8,
+    /// See [`Contact::FAVOURITE`].
+    pub flags: u8,
+    /// The known route's length byte as the radio stores it, or `None` to
+    /// flood. With it, `out_path` is copied back verbatim.
+    pub out_path_len: Option<u8>,
+    pub out_path: Vec<u8>,
+    pub name: String,
+    /// The node's clock in its newest advert, in Unix seconds.
+    pub last_advert: u32,
+    pub lat_e6: i32,
+    pub lon_e6: i32,
+}
+
+impl Contact {
+    /// A favourite is never replaced to make room for a new contact.
+    pub const FAVOURITE: u8 = 0x01;
+
+    pub const fn is_favourite(&self) -> bool {
+        self.flags & Self::FAVOURITE != 0
+    }
+
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        let pubkey = *r.array()?;
+        let (kind, flags) = (r.u8()?, r.u8()?);
+        let out_path_len = hops(r.u8()?);
+        let out_path = r.take(MAX_PATH_SIZE)?.to_vec();
+        Ok(Self {
+            pubkey,
+            kind,
+            flags,
+            out_path_len,
+            out_path,
+            name: text(r.take(32)?),
+            last_advert: r.u32_le()?,
+            lat_e6: r.i32_le()?,
+            lon_e6: r.i32_le()?,
+        })
+    }
+}
+
+/// The radio accepted a direct message for sending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sent {
+    /// Flooded, because the radio knows no route to the recipient.
+    pub flood: bool,
+    /// The code the recipient's acknowledgement will carry.
+    pub expected_ack: u32,
+    /// How long the radio expects the acknowledgement to take.
+    pub timeout_ms: u32,
+}
+
+/// A recipient acknowledged a direct message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SendConfirmed {
+    pub ack: u32,
+    pub round_trip_ms: u32,
 }
 
 /// A direct message to the radio, from its queue.
@@ -441,6 +714,90 @@ mod tests {
         out.extend((bytes.len() as u16).to_le_bytes());
         out.extend(bytes);
         out
+    }
+
+    #[test]
+    fn sending_commands() {
+        assert_eq!(set_device_time(0x0102_0304), [6, 4, 3, 2, 1]);
+        assert_eq!(send_channel_text(2, 1, "hi"), [3, 0, 2, 1, 0, 0, 0, b'h', b'i']);
+        assert_eq!(
+            send_text(&[9; 6], 0, 1, "yo"),
+            [2, 0, 0, 1, 0, 0, 0, 9, 9, 9, 9, 9, 9, b'y', b'o']
+        );
+
+        assert_eq!(set_manual_add_contacts(true), [38, 1]);
+        assert_eq!(set_autoadd_config(autoadd::OVERWRITE_OLDEST | autoadd::CHAT, 0), [58, 3, 0]);
+        let set = set_channel(1, "#test", &[7; 16]);
+        assert_eq!(
+            (set.len(), &set[..7]),
+            (2 + 32 + 16, &[32, 1, b'#', b't', b'e', b's', b't'][..])
+        );
+        assert_eq!(set[2 + 31], 0, "the name stays NUL-terminated");
+
+        let contact = Contact {
+            pubkey: [5; 32],
+            kind: 1,
+            flags: 0,
+            out_path_len: None,
+            out_path: Vec::new(),
+            name: "Ünïcode name that is far too long to fit".into(),
+            last_advert: 7,
+            lat_e6: -1,
+            lon_e6: 2,
+        };
+        let frame = add_update_contact(&contact);
+        assert_eq!(frame.len(), 1 + 32 + 3 + 64 + 32 + 12);
+        assert_eq!(frame[35], 0xFF, "no known path: flood");
+        // The radio sends the same layout back, plus a last-modified time.
+        let mut reply = frame.clone();
+        reply[0] = code::CONTACT;
+        reply.extend(99u32.to_le_bytes());
+        let Frame::Contact(back) = Frame::parse(&reply).unwrap() else { panic!() };
+        assert_eq!(back.pubkey, contact.pubkey);
+        assert!(contact.name.starts_with(&back.name) && back.name.len() <= 31, "{}", back.name);
+        assert_eq!((back.last_advert, back.lat_e6, back.lon_e6), (7, -1, 2));
+    }
+
+    #[test]
+    fn sending_replies() {
+        let mut info = vec![code::CHANNEL_INFO, 3];
+        info.extend(padded::<32>("#test"));
+        info.extend([7; 16]);
+        let Frame::ChannelInfo(slot) = Frame::parse(&info).unwrap() else { panic!() };
+        assert_eq!(
+            (slot.slot, slot.name.as_str(), slot.secret, slot.is_empty()),
+            (3, "#test", [7; 16], false)
+        );
+
+        let sent =
+            [&[code::SENT, 1][..], &0xAABB_CCDDu32.to_le_bytes(), &5000u32.to_le_bytes()].concat();
+        assert_eq!(
+            Frame::parse(&sent).unwrap(),
+            Frame::Sent(Sent { flood: true, expected_ack: 0xAABB_CCDD, timeout_ms: 5000 })
+        );
+        let confirmed = [
+            &[code::PUSH_SEND_CONFIRMED][..],
+            &0xAABB_CCDDu32.to_le_bytes(),
+            &1234u32.to_le_bytes(),
+        ]
+        .concat();
+        assert_eq!(
+            Frame::parse(&confirmed).unwrap(),
+            Frame::SendConfirmed(SendConfirmed { ack: 0xAABB_CCDD, round_trip_ms: 1234 })
+        );
+        assert_eq!(error::describe(error::TABLE_FULL), "table full");
+        assert_eq!(
+            Frame::parse(&[code::CONTACTS_START, 3, 1, 0, 0]).unwrap(),
+            Frame::ContactsStart(259)
+        );
+        assert_eq!(
+            Frame::parse(&[code::END_OF_CONTACTS, 0, 0, 0, 0]).unwrap(),
+            Frame::EndOfContacts
+        );
+        assert_eq!(
+            Frame::parse(&[code::AUTOADD_CONFIG, 3, 0]).unwrap(),
+            Frame::AutoAddConfig { policy: 3, max_hops: 0 }
+        );
     }
 
     #[test]

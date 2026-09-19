@@ -4,7 +4,7 @@ Records and explores [MeshCore](https://github.com/meshcore-dev/MeshCore) mesh t
 
 A MeshCore repeater running observer firmware (or [meshcoretomqtt](https://github.com/Cisien/meshcoretomqtt)) publishes every packet it hears to an MQTT broker. ferromesh subscribes, keeps every message verbatim, decodes what it can (adverts, plus channel messages for channels you know), stores it all in SQLite, and serves it to clients that show history and follow live traffic.
 
-**Status:** early. Decoding, storage, the API, channel discovery, a command-line client and a terminal UI work. Alerts beyond the terminal UI, and sending, are planned; see [PLAN.md](PLAN.md).
+**Status:** early. Decoding, storage, the API, channel discovery, a command-line client, a terminal UI, and sending through a companion radio work. Alerts beyond the terminal UI are planned; see [PLAN.md](PLAN.md).
 
 ## Layout
 
@@ -48,7 +48,9 @@ A second radio, flashed with MeshCore's stock **companion** firmware and plugged
 device = "auto"   # the one Espressif USB device, or a path such as /dev/serial/by-id/usb-Espressif_...
 ```
 
-ferromeshd then records every packet the radio hears as observations beside your MQTT observers', stores direct messages sent to it (the radio decrypts them; its private key never leaves it), and logs its battery, noise floor and packet counts every 5 minutes. It warns if the radio stops hearing anything, and reconnects if it's unplugged. ferromeshd must be the radio's only client: don't pair a phone with it too, because whichever client fetches a queued message takes it. So far ferromeshd only listens; sending is next.
+ferromeshd then records every packet the radio hears as observations beside your MQTT observers', stores direct messages sent to it (the radio decrypts them; its private key never leaves it), and logs its battery, noise floor and packet counts every 5 minutes. It warns if the radio stops hearing anything, and reconnects if it's unplugged. ferromeshd must be the radio's only client: don't pair a phone with it too, because whichever client fetches a queued message takes it. Sending goes through it too: to a channel, or directly to a node (see below). ferromeshd gives a channel one of the radio's slots the first time you send to it, and adds a node to the radio's contacts from its advert. It also sets the radio's clock when it's behind, so messages carry the right time.
+
+The radio holds a few hundred contacts, and a busy mesh has more nodes than that, most of them repeaters, which don't need to be contacts. So ferromeshd sets the radio to add only chat radios as it hears them, replacing the contact it heard from least recently once full. Favourites are never replaced: everyone you exchange direct messages with becomes one, and `ferromesh contacts pin NAME` makes any other node one (a repeater you administer, a room server). If a direct message arrives that the radio can't read because it has never heard, or has forgotten, the sender, ferromeshd adds the possible senders from everything it has recorded, so the sender's automatic retry can be read. `ferromesh contacts` lists what's on the radio.
 
 ## Watching traffic
 
@@ -65,6 +67,20 @@ ferromesh query from:BNA* --since 6h
 ferromesh query --kind packets type:advert --json
 ferromesh dms                                 # direct messages to your companion radio
 ```
+
+### Sending
+
+With a companion radio attached and the server's token:
+
+```sh
+export FERROMESH_TOKEN=...                    # the server's api.token
+ferromesh send '#test' hello from the terminal
+ferromesh send KK4SW are you there?           # a direct message, by name or key prefix
+ferromesh contacts                            # the radio's contacts; ★ marks pinned ones
+ferromesh contacts pin Tanyard
+```
+
+`send` then follows the message for 20 seconds (`--follow`). For a channel message it shows who heard it: ferromesh knows the exact packet the radio will send, so every observer's reception of it counts, including your repeater's. For a direct message it shows whether the recipient acknowledged it, and how long that took. Every send is kept in the outbox (`GET /api/v1/outbox`). A channel must be added first, and a node must have been heard advertising.
 
 `tail` reconnects by itself and resumes after the last event it printed, so a dropped connection or a server restart doesn't lose or repeat anything the server stored.
 
@@ -84,7 +100,7 @@ Five views, switched with `1` to `5`:
 - **Nodes:** every node that has advertised.
 - **Alerts:** your watches, and new traffic that matched them.
 
-`Enter` opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field. `/` filters the current view, using the same filter language as `tail`. `w` saves a filter as a watch: matching traffic is highlighted, and new matches ring the bell and land in Alerts. Scrolling past the oldest row loads older history from the server. `?` lists every key.
+`c` composes a message to the selected channel (it needs the token, from `--token`, `FERROMESH_TOKEN` or the config file). `Enter` opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field. `/` filters the current view, using the same filter language as `tail`. `w` saves a filter as a watch: matching traffic is highlighted, and new matches ring the bell and land in Alerts. Scrolling past the oldest row loads older history from the server. `?` lists every key.
 
 Watches are kept in `~/.config/ferromesh/watches.toml`. Defaults for `server` and `token` can go in `~/.config/ferromesh/config.toml`, so a bare `ferromesh tui` finds your server.
 
@@ -113,6 +129,8 @@ Hashtag channels derive their key from the name, which is why guessing works; pr
 - `GET /api/v1/nodes?limit=` lists nodes, most recently heard first.
 - `GET /api/v1/packets/{hash}` returns one packet with every reception's raw frame.
 - `GET /api/v1/direct?limit=` returns direct messages to your companion radio, newest first.
+- `GET /api/v1/contacts` lists the companion radio's contacts; `POST /api/v1/contacts` (with the token) pins or unpins one: `{"to": ..., "pinned": true}`.
+- `POST /api/v1/send` (with the token) sends `{"to": ..., "text": ...}` through the companion radio; `GET /api/v1/outbox?limit=` lists what was sent, with who heard it or whether it was acknowledged.
 
 See `crates/ferromesh-model/src/wire.rs`.
 

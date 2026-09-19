@@ -91,6 +91,8 @@ pub struct Tally {
     pub duplicates: u64,
     pub statuses: u64,
     pub direct_messages: u64,
+    pub sent: u64,
+    pub acks: u64,
     pub malformed: u64,
     pub ignored: u64,
     pub unparsed: u64,
@@ -104,6 +106,8 @@ impl Tally {
         self.duplicates += other.duplicates;
         self.statuses += other.statuses;
         self.direct_messages += other.direct_messages;
+        self.sent += other.sent;
+        self.acks += other.acks;
         self.malformed += other.malformed;
         self.ignored += other.ignored;
         self.unparsed += other.unparsed;
@@ -115,13 +119,15 @@ impl fmt::Display for Tally {
         write!(
             f,
             "records={} observations={} new_packets={} duplicates={} statuses={} \
-             direct_messages={} malformed={} ignored={} unparsed={}",
+             direct_messages={} sent={} acks={} malformed={} ignored={} unparsed={}",
             self.records,
             self.observations,
             self.new_packets,
             self.duplicates,
             self.statuses,
             self.direct_messages,
+            self.sent,
+            self.acks,
             self.malformed,
             self.ignored,
             self.unparsed,
@@ -146,6 +152,20 @@ pub fn ingest(store: &mut Store, records: &[RawRecord], tally: &mut Tally) -> Re
                         batch_tally.direct_messages += 1;
                     } else {
                         batch_tally.duplicates += 1;
+                    }
+                }
+                Ok(Message::Sent(message)) => {
+                    if batch.record_sent(&message)? {
+                        batch_tally.sent += 1;
+                    } else {
+                        batch_tally.duplicates += 1;
+                    }
+                }
+                Ok(Message::Ack(ack)) => {
+                    if batch.record_ack(&ack)? {
+                        batch_tally.acks += 1;
+                    } else {
+                        batch_tally.ignored += 1;
                     }
                 }
                 Ok(Message::Status(report)) => {
@@ -199,6 +219,7 @@ pub fn format_counts(counts: &Counts) -> String {
         ("nodes", counts.nodes),
         ("channels", counts.channels),
         ("direct messages", counts.direct_messages),
+        ("sent messages", counts.sent_messages),
     ]
     .iter()
     .map(|(label, count)| format!("{label:<15}{count:>10}"))

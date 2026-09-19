@@ -70,6 +70,14 @@ const CANONICAL: &[(&str, &str)] = &[
          FROM direct_messages d JOIN observers o ON o.id = d.observer_id
          ORDER BY o.pubkey, d.sender_prefix, d.sender_timestamp, d.txt_type, d.body",
     ),
+    (
+        "sent_messages",
+        "SELECT o.pubkey, s.sent_at, s.channel, s.recipient, s.recipient_name, s.body,
+                s.sender_timestamp, s.packet_hash, s.expected_ack, s.ack_timeout_ms, s.flood,
+                s.error, s.acked_at, s.round_trip_ms
+         FROM sent_messages s JOIN observers o ON o.id = s.observer_id
+         ORDER BY o.pubkey, s.sender_timestamp, s.body",
+    ),
 ];
 
 pub(crate) fn digest(conn: &Connection) -> rusqlite::Result<String> {

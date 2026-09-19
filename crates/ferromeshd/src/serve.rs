@@ -33,8 +33,16 @@ pub async fn run(config: Config) -> Result<()> {
     let (events, _) = broadcast::channel(EVENT_BUFFER);
     let (stop, stopped) = watch::channel(false);
     let (jobs, queue) = mpsc::channel(4096);
-    let state = AppState::new(config.db_path(), events.clone(), stopped)
+    let companion = config
+        .companion
+        .clone()
+        .map(|companion| Companion::spawn(companion, jobs.clone(), config.db_path()))
+        .transpose()?;
+    let mut state = AppState::new(config.db_path(), events.clone(), stopped)
         .with_writer(jobs.clone(), config.api.token.clone());
+    if let Some(companion) = &companion {
+        state = state.with_companion(companion.requests());
+    }
     let api = tokio::spawn(api::serve(listener, state));
     let changes = if config.api.token.is_some() { "with token" } else { "disabled" };
     info!(listen = %config.api.listen, changes, "API listening");
@@ -42,12 +50,6 @@ pub async fn run(config: Config) -> Result<()> {
     let writer = std::thread::Builder::new()
         .name("writer".into())
         .spawn(move || writer::run(store, raw, queue, events))?;
-
-    let companion = config
-        .companion
-        .clone()
-        .map(|companion| Companion::spawn(companion, jobs.clone()))
-        .transpose()?;
 
     let subscribed = subscribe(&config, jobs).await;
     // Stopping the companion and then the API releases their handles on the
