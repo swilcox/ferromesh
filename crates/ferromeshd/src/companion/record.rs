@@ -8,6 +8,7 @@
 //!   they came from.
 //! - `sent` describes a message ferromesh asked the radio to send, and how
 //!   the radio answered.
+//! - `advert` notes that ferromesh asked the radio to advertise itself.
 
 use anyhow::{Context, Result, bail};
 use ferromesh_store::{
@@ -75,6 +76,20 @@ pub fn status(identity: &Identity, source: &str, at: Timestamp, frames: &[Vec<u8
         "frames": frames,
     });
     record(identity, source, "status", at, payload)
+}
+
+/// An advert ferromesh asked the radio to transmit. `error` says why it
+/// wasn't sent. Nothing is stored: the advert itself comes back as a packet,
+/// through whichever observers hear it.
+pub fn advert(
+    identity: &Identity,
+    source: &str,
+    at: Timestamp,
+    flood: bool,
+    error: Option<&str>,
+) -> RawRecord {
+    let payload = json!({ "origin": identity.info.name, "flood": flood, "error": error });
+    record(identity, source, "advert", at, payload)
 }
 
 /// A channel message ferromesh asked the radio to send. `error` says why
@@ -161,6 +176,9 @@ pub fn parse(record: &RawRecord) -> Result<Message> {
     }
     if kind == "sent" {
         return Ok(Message::Sent(sent_message(observer, at, &fields)?));
+    }
+    if kind == "advert" {
+        return Ok(Message::Ignored);
     }
     let frame = fields.get("frame").and_then(Value::as_str).context("no frame")?;
     let frame = hex::decode(frame).context("frame is not hex")?;

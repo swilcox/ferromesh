@@ -34,6 +34,7 @@ pub mod command {
     pub const GET_CONTACTS: u8 = 4;
     pub const GET_DEVICE_TIME: u8 = 5;
     pub const SET_DEVICE_TIME: u8 = 6;
+    pub const SEND_SELF_ADVERT: u8 = 7;
     pub const ADD_UPDATE_CONTACT: u8 = 9;
     pub const SYNC_NEXT_MESSAGE: u8 = 10;
     pub const DEVICE_QUERY: u8 = 22;
@@ -187,6 +188,14 @@ pub fn send_text(recipient: &[u8; 6], attempt: u8, timestamp: u32, text: &str) -
 
 /// The reply is [`Frame::ChannelInfo`]; unused slots have an empty name and
 /// a zero secret.
+/// Advertises the radio, so others can add it as a contact. A flood advert
+/// crosses the mesh and costs everyone airtime; a zero-hop one reaches only
+/// the radios that hear it directly. The reply is [`Frame::Ok`], or
+/// [`Frame::Err`] with [`error::TABLE_FULL`].
+pub fn send_self_advert(flood: bool) -> Vec<u8> {
+    vec![command::SEND_SELF_ADVERT, u8::from(flood)]
+}
+
 pub fn get_channel(slot: u8) -> Vec<u8> {
     vec![command::GET_CHANNEL, slot]
 }
@@ -805,6 +814,8 @@ mod tests {
         assert_eq!(encode(&device_query()), [b'<', 2, 0, 22, 3]);
         assert_eq!(app_start("fm"), [1, 0, 0, 0, 0, 0, 0, 0, b'f', b'm']);
         assert_eq!(get_stats(StatsKind::Packets), [56, 2]);
+        assert_eq!(send_self_advert(false), [7, 0]);
+        assert_eq!(send_self_advert(true), [7, 1]);
     }
 
     #[test]

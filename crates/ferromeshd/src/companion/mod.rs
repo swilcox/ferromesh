@@ -43,6 +43,9 @@ const POLL: Duration = Duration::from_millis(250);
 const STATUS_EVERY: Duration = Duration::from_secs(300);
 /// A radio can come up unable to hear anything while looking healthy.
 const STALL: Duration = Duration::from_secs(900);
+/// A flood advert reaches the whole mesh, so one straight after another is
+/// almost always a mistake. Deliberate repeats, a minute apart, are fine.
+const FLOOD_ADVERT_GAP: Duration = Duration::from_secs(60);
 /// A clock further off than this would put wrong times on sent messages.
 const CLOCK_TOLERANCE_SECS: i64 = 120;
 
@@ -58,6 +61,11 @@ pub enum Request {
         contact: Contact,
         text: String,
         reply: Reply,
+    },
+    /// Advertise the radio, so others can add it as a contact.
+    Advert {
+        flood: bool,
+        reply: oneshot::Sender<Result<Advertised, SendError>>,
     },
     /// List the radio's contacts.
     Contacts {
@@ -79,6 +87,15 @@ pub struct Accepted {
     pub sender_timestamp: u32,
 }
 
+/// The radio advertised itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advertised {
+    /// The radio's own key, which the advert carries.
+    pub pubkey: [u8; 32],
+    pub name: String,
+    pub flood: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SendError {
     /// The message can't be sent as written, such as when it's too long.
@@ -93,6 +110,9 @@ impl Request {
     fn refuse(self, error: SendError) {
         match self {
             Self::Channel { reply, .. } | Self::Direct { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Advert { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Self::Contacts { reply } => {
@@ -245,6 +265,7 @@ fn serve<L: Read + Write>(
     let mut rescue = Rescue::default();
     let mut next_status = Instant::now();
     let mut last_timestamp = 0;
+    let mut last_flood_advert = None;
     loop {
         if Instant::now() >= next_status {
             let frames = session.stats()?;
@@ -256,7 +277,7 @@ fn serve<L: Read + Write>(
         }
         while let Ok(request) = requests.try_recv() {
             let timestamp = next_timestamp(&mut last_timestamp);
-            handle(session, &identity, source, jobs, request, timestamp)?;
+            handle(session, &identity, source, jobs, request, timestamp, &mut last_flood_advert)?;
         }
         session.poll(poll)?;
         for received in session.take_received() {
@@ -294,6 +315,7 @@ fn handle<L: Read + Write>(
     jobs: &mpsc::Sender<Job>,
     request: Request,
     timestamp: u32,
+    last_flood_advert: &mut Option<Instant>,
 ) -> Result<()> {
     match request {
         Request::Channel { name, secret, text, reply } => {
@@ -323,6 +345,47 @@ fn handle<L: Read + Write>(
             let _ = reply.send(
                 outcome
                     .map(|()| Accepted { sender_timestamp: timestamp })
+                    .map_err(SendError::Failed),
+            );
+            result.map(|_| ())
+        }
+        Request::Advert { flood, reply } => {
+            let now = Instant::now();
+            if flood
+                && let Some(last) = *last_flood_advert
+                && now.duration_since(last) < FLOOD_ADVERT_GAP
+            {
+                let wait = (FLOOD_ADVERT_GAP - now.duration_since(last)).as_secs() + 1;
+                let _ = reply.send(Err(SendError::Invalid(format!(
+                    "the radio flood-advertised less than a minute ago; try again in {wait}s"
+                ))));
+                return Ok(());
+            }
+            let result = session.send_advert(flood);
+            let outcome = flatten(&result);
+            send(
+                jobs,
+                record::advert(
+                    identity,
+                    source,
+                    Timestamp::now(),
+                    flood,
+                    outcome.as_ref().err().map(String::as_str),
+                ),
+            );
+            if outcome.is_ok() {
+                info!(flood, name = %identity.info.name, "the companion radio advertised itself");
+                if flood {
+                    *last_flood_advert = Some(now);
+                }
+            }
+            let _ = reply.send(
+                outcome
+                    .map(|()| Advertised {
+                        pubkey: identity.info.pubkey,
+                        name: identity.info.name.clone(),
+                        flood,
+                    })
                     .map_err(SendError::Failed),
             );
             result.map(|_| ())
@@ -546,7 +609,8 @@ mod tests {
         let (reply, answer) = oneshot::channel();
         let request =
             Request::Channel { name: "#test".into(), secret: [7; 16], text: "hi".into(), reply };
-        handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_000).unwrap();
+        handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_000, &mut None)
+            .unwrap();
         assert_eq!(
             answer.blocking_recv().unwrap(),
             Ok(Accepted { sender_timestamp: 1_789_000_000 })
@@ -579,7 +643,8 @@ mod tests {
         let (reply, _answer) = oneshot::channel();
         let request =
             Request::Channel { name: "#test".into(), secret: [7; 16], text: "again".into(), reply };
-        handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_001).unwrap();
+        handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_001, &mut None)
+            .unwrap();
         let sets = session.link().commands.iter().filter(|c| c[0] == command::SET_CHANNEL).count();
         assert_eq!(sets, 1);
     }
@@ -591,7 +656,8 @@ mod tests {
         let (jobs, mut queue) = mpsc::channel(16);
         let (reply, answer) = oneshot::channel();
         let request = Request::Direct { contact: contact(), text: "hello".into(), reply };
-        handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_000).unwrap();
+        handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_000, &mut None)
+            .unwrap();
         assert_eq!(
             answer.blocking_recv().unwrap(),
             Ok(Accepted { sender_timestamp: 1_789_000_000 })
@@ -632,7 +698,8 @@ mod tests {
                 text: text.into(),
                 reply,
             };
-            handle(&mut session, &identity, "companion:test", &jobs, request, 1).unwrap();
+            handle(&mut session, &identity, "companion:test", &jobs, request, 1, &mut None)
+                .unwrap();
             assert!(
                 matches!(answer.blocking_recv().unwrap(), Err(SendError::Invalid(_))),
                 "{text:?}"
@@ -646,9 +713,62 @@ mod tests {
             text: "x".repeat(154),
             reply,
         };
-        handle(&mut session, &identity, "companion:test", &jobs, request, 2).unwrap();
+        handle(&mut session, &identity, "companion:test", &jobs, request, 2, &mut None).unwrap();
         assert!(answer.blocking_recv().unwrap().is_ok());
         assert_eq!(kinds(&records(&mut queue)), ["sent"]);
+    }
+
+    #[test]
+    fn adverts_are_recorded_and_floods_are_paced() {
+        let mut session = Session::start(FakeRadio::default()).unwrap();
+        let identity = session.identity().clone();
+        let (jobs, mut queue) = mpsc::channel(16);
+        let advert = |flood| {
+            let (reply, answer) = oneshot::channel();
+            (Request::Advert { flood, reply }, answer)
+        };
+        let mut last_flood = None;
+
+        // Zero-hop adverts are cheap, so they aren't paced.
+        for _ in 0..2 {
+            let (request, answer) = advert(false);
+            handle(&mut session, &identity, "companion:test", &jobs, request, 1, &mut last_flood)
+                .unwrap();
+            assert_eq!(
+                answer.blocking_recv().unwrap(),
+                Ok(Advertised {
+                    pubkey: identity.info.pubkey,
+                    name: identity.info.name.clone(),
+                    flood: false,
+                })
+            );
+        }
+        assert_eq!(last_flood, None);
+
+        let (request, answer) = advert(true);
+        handle(&mut session, &identity, "companion:test", &jobs, request, 2, &mut last_flood)
+            .unwrap();
+        assert!(answer.blocking_recv().unwrap().is_ok_and(|sent| sent.flood));
+        assert!(last_flood.is_some());
+
+        // A second flood straight after is refused, and never reaches the radio.
+        let (request, answer) = advert(true);
+        handle(&mut session, &identity, "companion:test", &jobs, request, 3, &mut last_flood)
+            .unwrap();
+        assert!(matches!(answer.blocking_recv().unwrap(), Err(SendError::Invalid(_))));
+
+        let records = records(&mut queue);
+        assert_eq!(kinds(&records), ["advert", "advert", "advert"]);
+        let payload: serde_json::Value = serde_json::from_str(&records[2].payload).unwrap();
+        assert_eq!(payload["flood"], true);
+        assert!(payload["error"].is_null());
+        let sent: Vec<&Vec<u8>> = session
+            .link()
+            .commands
+            .iter()
+            .filter(|command| command[0] == command::SEND_SELF_ADVERT)
+            .collect();
+        assert_eq!(sent, [&vec![7, 0], &vec![7, 0], &vec![7, 1]]);
     }
 
     #[test]
@@ -659,7 +779,7 @@ mod tests {
         let (jobs, mut queue) = mpsc::channel(16);
         let (reply, answer) = oneshot::channel();
         let request = Request::Direct { contact: contact(), text: "hello".into(), reply };
-        handle(&mut session, &identity, "companion:test", &jobs, request, 5).unwrap();
+        handle(&mut session, &identity, "companion:test", &jobs, request, 5, &mut None).unwrap();
         assert_eq!(
             answer.blocking_recv().unwrap(),
             Err(SendError::Failed("the radio refused adding the contact: table full".into()))

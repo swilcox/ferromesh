@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ferromesh_model::{
-    ChannelInfo, Event, Filter, FilterError, Kind, NodeInfo, ObserverHealth, PacketDetail,
+    ChannelInfo, DirectMessageInfo, Event, Filter, FilterError, Kind, NodeInfo, ObserverHealth,
+    PacketDetail, SendStatus, SentMessageInfo,
 };
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -24,6 +25,7 @@ const PAGE: isize = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {
     Messages,
+    Dms,
     Packets,
     Rf,
     Nodes,
@@ -32,12 +34,20 @@ pub enum View {
 }
 
 impl View {
-    pub const ALL: [Self; 6] =
-        [Self::Messages, Self::Packets, Self::Rf, Self::Nodes, Self::Alerts, Self::Health];
+    pub const ALL: [Self; 7] = [
+        Self::Messages,
+        Self::Dms,
+        Self::Packets,
+        Self::Rf,
+        Self::Nodes,
+        Self::Alerts,
+        Self::Health,
+    ];
 
     pub const fn title(self) -> &'static str {
         match self {
             Self::Messages => "Messages",
+            Self::Dms => "DMs",
             Self::Packets => "Packets",
             Self::Rf => "RF",
             Self::Nodes => "Nodes",
@@ -52,7 +62,7 @@ impl View {
             Self::Messages => Some(Kind::Messages),
             Self::Packets => Some(Kind::Packets),
             Self::Rf => Some(Kind::Observations),
-            Self::Nodes | Self::Alerts | Self::Health => None,
+            Self::Dms | Self::Nodes | Self::Alerts | Self::Health => None,
         }
     }
 }
@@ -131,12 +141,45 @@ pub struct Alert {
     pub event: Event,
 }
 
+/// One direct message in a conversation, sent or received.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DmLine {
+    pub at: Timestamp,
+    /// Sent by us, rather than received.
+    pub outgoing: bool,
+    pub body: String,
+    /// Hops it travelled, for a received message.
+    pub hops: Option<u8>,
+    pub snr: Option<f64>,
+    /// How a sent message is getting on.
+    pub status: Option<SendStatus>,
+    pub round_trip_ms: Option<u32>,
+    pub error: Option<String>,
+}
+
+/// Everything exchanged with one node, oldest first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conversation {
+    /// The node's name, or its key prefix when nothing has named it. This is
+    /// also what a reply is addressed to.
+    pub who: String,
+    pub messages: Vec<DmLine>,
+}
+
+impl Conversation {
+    pub fn last_at(&self) -> Timestamp {
+        self.messages.last().map_or(Timestamp::UNIX_EPOCH, |message| message.at)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prompt {
     Filter,
     Watch,
     /// A message to the selected channel.
     Compose,
+    /// Advertising the radio: `l` for neighbours, `f` for the whole mesh.
+    Advert,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,6 +214,10 @@ pub enum Command {
         to: String,
         text: String,
     },
+    /// Advertise the server's companion radio.
+    Advert {
+        flood: bool,
+    },
 }
 
 /// News from the network side.
@@ -183,6 +230,10 @@ pub enum Update {
     Nodes(Vec<NodeInfo>),
     /// Observers' health, or why it couldn't be fetched.
     Health(Result<Vec<ObserverHealth>, String>),
+    /// Direct messages received, or why they couldn't be fetched.
+    Dms(Result<Vec<DirectMessageInfo>, String>),
+    /// Direct messages sent, newest first.
+    SentDms(Vec<SentMessageInfo>),
     Detail(String, Result<PacketDetail, String>),
     Older {
         kind: Kind,
@@ -209,6 +260,15 @@ pub struct App {
     pub channels: Vec<ChannelInfo>,
     pub nodes: Vec<NodeInfo>,
     pub health: Result<Vec<ObserverHealth>, String>,
+    /// Direct messages received, newest first, or why they couldn't be
+    /// fetched.
+    pub dms: Result<Vec<DirectMessageInfo>, String>,
+    /// Direct messages sent, newest first.
+    pub sent_dms: Vec<SentMessageInfo>,
+    /// The DM view's conversation; `None` selects the newest.
+    pub correspondent: Option<String>,
+    /// Lines the conversation is scrolled back from its newest message.
+    pub dm_scroll: usize,
     /// Node names by lowercase public-key prefix of 1–3 bytes, `None` where
     /// the prefix is ambiguous or the node unnamed.
     hop_names: HashMap<String, Option<String>>,
@@ -252,6 +312,10 @@ impl App {
             channels: Vec::new(),
             nodes: Vec::new(),
             health: Ok(Vec::new()),
+            dms: Ok(Vec::new()),
+            sent_dms: Vec::new(),
+            correspondent: None,
+            dm_scroll: 0,
             hop_names: HashMap::new(),
             channel: None,
             sidebar_focus: false,
@@ -410,6 +474,74 @@ impl App {
             .collect()
     }
 
+    /// Everything exchanged with each node, newest conversation first and
+    /// each conversation oldest message last. Messages received are grouped
+    /// by the sender's name, or by its key prefix while no advert has named
+    /// it; messages sent are grouped by who they were addressed to, which is
+    /// the same name.
+    pub fn conversations(&self) -> Vec<Conversation> {
+        let mut threads: BTreeMap<String, Vec<DmLine>> = BTreeMap::new();
+        for dm in self.dms.as_deref().unwrap_or_default() {
+            let who = dm.sender.clone().unwrap_or_else(|| dm.sender_prefix.clone());
+            threads.entry(who).or_default().push(DmLine {
+                at: dm.received_at,
+                outgoing: false,
+                body: dm.body.clone(),
+                hops: dm.hops,
+                snr: dm.snr,
+                status: None,
+                round_trip_ms: None,
+                error: None,
+            });
+        }
+        for sent in self.sent_dms.iter().filter(|sent| sent.direct) {
+            threads.entry(sent.to.clone()).or_default().push(DmLine {
+                at: sent.sent_at,
+                outgoing: true,
+                body: sent.body.clone(),
+                hops: None,
+                snr: None,
+                status: Some(sent.status),
+                round_trip_ms: sent.round_trip_ms,
+                error: sent.error.clone(),
+            });
+        }
+        let mut conversations: Vec<Conversation> = threads
+            .into_iter()
+            .map(|(who, mut messages)| {
+                messages.sort_by_key(|message| message.at);
+                Conversation { who, messages }
+            })
+            .collect();
+        conversations.sort_by(|a, b| b.last_at().cmp(&a.last_at()).then_with(|| a.who.cmp(&b.who)));
+        conversations
+    }
+
+    /// The conversation the DM view is showing, and where it sits in the
+    /// list.
+    pub fn selected_conversation<'a>(
+        &self,
+        conversations: &'a [Conversation],
+    ) -> Option<(usize, &'a Conversation)> {
+        let index = match &self.correspondent {
+            Some(who) => conversations.iter().position(|thread| &thread.who == who)?,
+            None => 0,
+        };
+        conversations.get(index).map(|thread| (index, thread))
+    }
+
+    /// Who `c` writes to: the selected conversation in the DM view, or the
+    /// selected channel in the messages view.
+    pub fn compose_target(&self) -> Option<String> {
+        match self.view {
+            View::Dms => {
+                let conversations = self.conversations();
+                self.selected_conversation(&conversations).map(|(_, thread)| thread.who.clone())
+            }
+            _ => self.channel.clone(),
+        }
+    }
+
     pub fn apply(&mut self, update: Update) {
         match update {
             Update::Event(event) => self.receive(event, true),
@@ -434,6 +566,8 @@ impl App {
             Update::Lost(kind, reason) => self.feed_mut(kind).connection = Connection::Lost(reason),
             Update::Channels(channels) => self.channels = channels,
             Update::Health(health) => self.health = health,
+            Update::Dms(dms) => self.dms = dms,
+            Update::SentDms(sent) => self.sent_dms = sent,
             Update::Nodes(nodes) => {
                 self.hop_names.clear();
                 for node in &nodes {
@@ -583,7 +717,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char(digit @ '1'..='6') => {
+            KeyCode::Char(digit @ '1'..='7') => {
                 self.show(View::ALL[usize::from(digit as u8 - b'1')])
             }
             KeyCode::Char('?') => self.help = true,
@@ -595,7 +729,7 @@ impl App {
                     Some(format!("bell {}", if self.bell_enabled { "on" } else { "off" }));
             }
             KeyCode::Tab | KeyCode::BackTab => match self.view {
-                View::Messages => self.sidebar_focus = !self.sidebar_focus,
+                View::Messages | View::Dms => self.sidebar_focus = !self.sidebar_focus,
                 View::Alerts => self.watch_focus = !self.watch_focus,
                 _ => {}
             },
@@ -620,7 +754,10 @@ impl App {
                 self.alerts.clear();
                 self.alert_selected = 0;
             }
-            KeyCode::Char('c') if self.view == View::Messages => self.prompt(Prompt::Compose),
+            KeyCode::Char('c') if matches!(self.view, View::Messages | View::Dms) => {
+                self.prompt(Prompt::Compose);
+            }
+            KeyCode::Char('a') => self.prompt(Prompt::Advert),
             _ => {}
         }
         Vec::new()
@@ -652,6 +789,22 @@ impl App {
         match self.view {
             View::Messages if self.sidebar_focus => {
                 self.move_sidebar(delta);
+                Vec::new()
+            }
+            View::Dms if self.sidebar_focus => {
+                let conversations = self.conversations();
+                let current = self.selected_conversation(&conversations).map_or(0, |(at, _)| at);
+                let last = conversations.len().saturating_sub(1);
+                self.correspondent =
+                    conversations.get(step(current, delta, last)).map(|thread| thread.who.clone());
+                self.dm_scroll = 0;
+                Vec::new()
+            }
+            View::Dms => {
+                // Scrolling back from the newest message, so a conversation
+                // that grows while you read keeps its place.
+                let back = -delta;
+                self.dm_scroll = self.dm_scroll.saturating_add_signed(back);
                 Vec::new()
             }
             View::Nodes => {
@@ -754,19 +907,27 @@ impl App {
     }
 
     fn prompt(&mut self, prompt: Prompt) {
-        if prompt == Prompt::Watch && matches!(self.view, View::Nodes | View::Health) {
+        if prompt == Prompt::Watch && matches!(self.view, View::Dms | View::Nodes | View::Health) {
             self.status = Some("watches apply to messages, packets and RF".into());
             return;
         }
-        if prompt == Prompt::Filter && self.view == View::Health {
+        if prompt == Prompt::Filter && matches!(self.view, View::Dms | View::Health) {
             self.status = Some("there's nothing to filter here".into());
             return;
         }
+        if prompt == Prompt::Advert {
+            self.input = Some(Input { prompt, text: String::new(), error: None });
+            return;
+        }
         if prompt == Prompt::Compose {
-            if self.channel.is_none() {
-                self.status = Some("pick a channel to send to first (Tab, then j/k)".into());
-            } else {
-                self.input = Some(Input { prompt, text: String::new(), error: None });
+            match self.compose_target() {
+                Some(_) => self.input = Some(Input { prompt, text: String::new(), error: None }),
+                None if self.view == View::Dms => {
+                    self.status = Some("no conversation to reply to yet".into());
+                }
+                None => {
+                    self.status = Some("pick a channel to send to first (Tab, then j/k)".into());
+                }
             }
             return;
         }
@@ -781,6 +942,9 @@ impl App {
     }
 
     fn input_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        if self.input.as_ref().is_some_and(|input| input.prompt == Prompt::Advert) {
+            return self.advert_key(key);
+        }
         let Some(input) = &mut self.input else {
             return Vec::new();
         };
@@ -800,6 +964,27 @@ impl App {
         Vec::new()
     }
 
+    /// `l` advertises to the radios that hear it directly, `f` across the
+    /// whole mesh; anything else waits, and Esc gives up.
+    fn advert_key(&mut self, key: KeyEvent) -> Vec<Command> {
+        let flood = match key.code {
+            KeyCode::Char('l' | 'L') => false,
+            KeyCode::Char('f' | 'F') => true,
+            KeyCode::Esc => {
+                self.input = None;
+                return Vec::new();
+            }
+            _ => return Vec::new(),
+        };
+        self.input = None;
+        self.status = Some(if flood {
+            "advertising across the mesh…".into()
+        } else {
+            "advertising to the neighbours…".to_owned()
+        });
+        vec![Command::Advert { flood }]
+    }
+
     fn submit(&mut self) -> Vec<Command> {
         let Some(input) = self.input.take() else {
             return Vec::new();
@@ -807,15 +992,17 @@ impl App {
         let text = input.text.trim().to_owned();
         let kind = self.view.kind();
         match input.prompt {
+            // Answered by a single key in advert_key, never submitted.
+            Prompt::Advert => Vec::new(),
             Prompt::Compose => {
-                let Some(channel) = self.channel.clone() else {
+                let Some(to) = self.compose_target() else {
                     return Vec::new();
                 };
                 if text.is_empty() {
                     return Vec::new();
                 }
-                self.status = Some(format!("sending to {channel}…"));
-                vec![Command::Send { to: channel, text }]
+                self.status = Some(format!("sending to {to}…"));
+                vec![Command::Send { to, text }]
             }
             Prompt::Filter => {
                 if text.is_empty() {
@@ -1065,7 +1252,7 @@ mod tests {
         assert!(app.take_bell());
         assert!(!app.take_bell());
 
-        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Char('6'));
         assert_eq!(app.unseen_alerts, 0);
         assert_eq!(press(&mut app, KeyCode::Enter), [Command::Inspect(format!("{:016X}", 3))]);
     }
@@ -1174,7 +1361,7 @@ mod tests {
         assert_eq!(saved, [Command::SaveWatches(vec![expected])]);
         assert!(app.is_watched(app.visible(View::Messages)[0]));
 
-        press(&mut app, KeyCode::Char('5'));
+        press(&mut app, KeyCode::Char('6'));
         press(&mut app, KeyCode::Tab);
         assert_eq!(press(&mut app, KeyCode::Char('d')), [Command::SaveWatches(Vec::new())]);
         assert!(!app.is_watched(app.visible(View::Messages)[0]));

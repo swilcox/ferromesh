@@ -208,6 +208,14 @@ impl<L: Read + Write> Session<L> {
         Ok(ok_or_refusal(&reply, "setting the clock"))
     }
 
+    /// Advertises the radio, so other nodes can add it as a contact. A
+    /// flood advert crosses the mesh; a zero-hop one reaches only the
+    /// radios that hear it directly.
+    pub fn send_advert(&mut self, flood: bool) -> Result<Result<(), Refusal>> {
+        let reply = self.request(&companion::send_self_advert(flood))?;
+        Ok(ok_or_refusal(&reply, "advertising"))
+    }
+
     /// Transmits `text` on the channel with `secret`, first giving the
     /// channel one of the radio's slots if it has none.
     pub fn send_channel(
@@ -552,7 +560,9 @@ pub(crate) mod tests {
                     self.slots.push((command[1], command[2..].to_vec()));
                     ok
                 }
-                command::SEND_CHANNEL_TXT_MSG | command::SET_DEVICE_TIME => ok,
+                command::SEND_CHANNEL_TXT_MSG
+                | command::SET_DEVICE_TIME
+                | command::SEND_SELF_ADVERT => ok,
                 // Contacts are kept as the frames that added them, which have
                 // the same layout as the radio's contact frames.
                 command::GET_CONTACT_BY_KEY => {

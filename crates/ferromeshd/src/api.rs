@@ -12,11 +12,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use ferromesh_model::{
-    AddChannel, ChannelInfo, DEFAULT_HEALTH_HOURS, DEFAULT_HISTORY_LIMIT, DirectMessageInfo,
-    DirectQuery, Event, Filter, Frame, GuessChannels, GuessReport, Health, HealthQuery,
-    HistoryQuery, Kind, MAX_DIRECT, MAX_HEALTH_HOURS, MAX_HISTORY_LIMIT, MAX_NODES, MAX_OUTBOX,
-    NodeInfo, NodesQuery, ObserverHealth, OutboxQuery, PacketDetail, PinRequest, RadioContact,
-    SendRequest, SentMessageInfo, StreamQuery, UnknownChannel,
+    AddChannel, AdvertRequest, AdvertSent, ChannelInfo, DEFAULT_HEALTH_HOURS,
+    DEFAULT_HISTORY_LIMIT, DirectMessageInfo, DirectQuery, Event, Filter, Frame, GuessChannels,
+    GuessReport, Health, HealthQuery, HistoryQuery, Kind, MAX_DIRECT, MAX_HEALTH_HOURS,
+    MAX_HISTORY_LIMIT, MAX_NODES, MAX_OUTBOX, NodeInfo, NodesQuery, ObserverHealth, OutboxQuery,
+    PacketDetail, PinRequest, RadioContact, SendRequest, SentMessageInfo, StreamQuery,
+    UnknownChannel,
 };
 use ferromesh_store::{Micros, Order, Page, Reader, SendTarget};
 use jiff::Timestamp;
@@ -97,6 +98,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/send", post(send_message))
         .route("/api/v1/outbox", get(list_outbox))
         .route("/api/v1/contacts", get(list_contacts).post(pin_contact))
+        .route("/api/v1/advert", post(send_advert))
         .route("/api/v1/observers", get(observer_health))
         .route("/api/v1/{kind}", get(history))
         .with_state(state)
@@ -343,6 +345,25 @@ async fn pin_contact(
     let pinned = request.pinned;
     let held = ask_radio(&state, |reply| Request::Pin { contact, pinned, reply }).await?;
     Ok(Json(radio_contact(&held)))
+}
+
+async fn send_advert(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Option<Json<AdvertRequest>>,
+) -> Result<(StatusCode, Json<AdvertSent>), ApiError> {
+    authorize(&state, &headers)?;
+    let flood = request.map(|Json(request)| request.flood).unwrap_or_default();
+    let sent = ask_radio(&state, |reply| Request::Advert { flood, reply }).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(AdvertSent {
+            pubkey: hex::encode(sent.pubkey),
+            name: sent.name,
+            flood: sent.flood,
+            sent_at: Timestamp::now(),
+        }),
+    ))
 }
 
 /// Hands a request to the companion radio's thread and waits for its answer.

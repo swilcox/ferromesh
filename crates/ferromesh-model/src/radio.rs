@@ -1,4 +1,4 @@
-//! The companion radio's contact list.
+//! The companion radio's contact list, and advertising it.
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -28,4 +28,25 @@ pub struct PinRequest {
     /// A node's advertised name, or a hex prefix of its key.
     pub to: String,
     pub pinned: bool,
+}
+
+/// `POST /api/v1/advert`, with the API token: ask the radio to advertise
+/// itself, so other nodes can add it as a contact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvertRequest {
+    /// A flood advert crosses the mesh and costs everyone airtime; the
+    /// default reaches only the radios that hear it directly.
+    #[serde(default)]
+    pub flood: bool,
+}
+
+/// What the radio transmitted, so a client can watch for it coming back
+/// through the observers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdvertSent {
+    /// The radio's own key, lowercase hex, which the advert carries.
+    pub pubkey: String,
+    pub name: String,
+    pub flood: bool,
+    pub sent_at: Timestamp,
 }

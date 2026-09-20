@@ -21,9 +21,11 @@ In Docker, pass the port through with a `compose.override.yaml`; see [running.md
 
 **Receives.** Every packet the radio hears becomes an observation with its SNR and RSSI, stored beside the observations from any MQTT observers. In the packet inspector you can then see the same packet from both.
 
-**Takes direct messages.** Messages addressed to the radio are decrypted on the radio — its private key never leaves it — and stored. `ferromesh dms` lists them, and the TUI shows them too.
+**Takes direct messages.** Messages addressed to the radio are decrypted on the radio — its private key never leaves it — and stored. `ferromesh dms` lists them, and the TUI's DMs view (`2`) shows each conversation, where `c` replies.
 
 **Sends.** `ferromesh send`, `POST /api/v1/send`, and `c` in the TUI all go out through it. Sending to a channel gives that channel one of the radio's 40 slots the first time. Sending to a node adds that node to the radio's contacts from its advert.
+
+**Advertises itself.** `ferromesh advert` (or `a` in the TUI) tells the radio to announce itself, so other nodes can add it as a contact; `--flood` carries it across the mesh instead of only to the radios that hear it directly.
 
 **Reports its health.** Battery, noise floor, airtime and packet counters every 5 minutes, which is what `ferromesh health` shows. If the radio stops hearing anything for a long stretch, ferromesh warns: that usually means it needs a reboot.
 

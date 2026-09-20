@@ -18,8 +18,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use ferromesh_model::{
-    ChannelInfo, Event, HistoryQuery, Kind, MAX_NODES, NodeInfo, ObserverHealth, PacketDetail,
-    SendRequest, SentMessageInfo,
+    AdvertRequest, AdvertSent, ChannelInfo, DirectMessageInfo, Event, HistoryQuery, Kind,
+    MAX_NODES, NodeInfo, ObserverHealth, PacketDetail, SendRequest, SentMessageInfo,
 };
 use futures_util::StreamExt;
 use jiff::Timestamp;
@@ -38,6 +38,11 @@ const HISTORY: [(Kind, usize); 3] =
     [(Kind::Messages, 1000), (Kind::Packets, 500), (Kind::Observations, 2000)];
 /// How often the channel and node lists are fetched.
 const REFRESH: Duration = Duration::from_secs(60);
+/// How often direct messages are fetched: often enough to hold a
+/// conversation, since they don't come down the event streams.
+const DM_REFRESH: Duration = Duration::from_secs(10);
+/// Direct messages kept in the DM view, sent and received.
+const DM_HISTORY: usize = 500;
 /// How long a snapshot waits for the server.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -95,6 +100,7 @@ async fn event_loop(
     let mut screen = Screen::default();
     let mut keys = EventStream::new();
     let mut refresh = tokio::time::interval(REFRESH);
+    let mut dms = tokio::time::interval(DM_REFRESH);
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     while !app.quit {
         app.now = Timestamp::now();
@@ -120,6 +126,7 @@ async fn event_loop(
                 }
             }
             _ = refresh.tick() => network.refresh(),
+            _ = dms.tick() => network.refresh_dms(),
             _ = clock.tick() => {}
         }
     }
@@ -250,6 +257,22 @@ impl Network {
                         updates.send(Update::Status(format!("couldn't save watches: {error:#}")));
                 }
             }
+            Command::Advert { flood } => {
+                let token = self.token.clone();
+                tokio::spawn(async move {
+                    let request = AdvertRequest { flood };
+                    let result: Result<AdvertSent> =
+                        server.post("/api/v1/advert", &request, token.as_deref()).await;
+                    let status = match result {
+                        Ok(sent) if sent.flood => {
+                            format!("{} advertised across the mesh", sent.name)
+                        }
+                        Ok(sent) => format!("{} advertised to its neighbours", sent.name),
+                        Err(error) => format!("couldn't advertise: {error:#}"),
+                    };
+                    let _ = updates.send(Update::Status(status));
+                });
+            }
             Command::Send { to, text } => {
                 let token = self.token.clone();
                 tokio::spawn(async move {
@@ -261,6 +284,7 @@ impl Network {
                         Err(error) => format!("couldn't send to {to}: {error:#}"),
                     };
                     let _ = updates.send(Update::Status(status));
+                    fetch_dms(&server, &updates).await;
                 });
             }
         }
@@ -269,6 +293,13 @@ impl Network {
     fn refresh(&self) {
         let (server, updates) = (self.server.clone(), self.updates.clone());
         tokio::spawn(async move { fetch_lists(&server, &updates).await });
+    }
+
+    /// Direct messages don't come down the event streams, so the DM view is
+    /// kept current by asking for them.
+    fn refresh_dms(&self) {
+        let (server, updates) = (self.server.clone(), self.updates.clone());
+        tokio::spawn(async move { fetch_dms(&server, &updates).await });
     }
 }
 
@@ -289,6 +320,20 @@ async fn fetch_lists(server: &Server, updates: &UnboundedSender<Update>) {
         .await
         .map_err(|error| format!("{error:#}"));
     let _ = updates.send(Update::Health(health));
+    fetch_dms(server, updates).await;
+}
+
+async fn fetch_dms(server: &Server, updates: &UnboundedSender<Update>) {
+    let dms = server
+        .get::<Vec<DirectMessageInfo>>(&format!("/api/v1/direct?limit={DM_HISTORY}"))
+        .await
+        .map_err(|error| format!("{error:#}"));
+    let _ = updates.send(Update::Dms(dms));
+    if let Ok(sent) =
+        server.get::<Vec<SentMessageInfo>>(&format!("/api/v1/outbox?limit={DM_HISTORY}")).await
+    {
+        let _ = updates.send(Update::SentDms(sent));
+    }
 }
 
 /// Keys for `--keys`: characters as typed, plus `<enter>`, `<esc>`, `<tab>`,

@@ -2,16 +2,16 @@
 
 use std::ops::Range;
 
-use ferromesh_model::{Event, Kind};
+use ferromesh_model::{Event, Kind, SendStatus};
 use jiff::Timestamp;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::app::{App, Connection, Prompt, View};
+use super::app::{App, Connection, Conversation, DmLine, Prompt, View};
 use super::{lists, overlay};
 use crate::render::name_hash;
 
@@ -33,6 +33,7 @@ const PALETTE: [Color; 10] = [
 #[derive(Debug, Default)]
 pub struct Screen {
     pub channels: usize,
+    pub correspondents: usize,
     pub messages: usize,
     pub packets: usize,
     pub rf: usize,
@@ -48,6 +49,7 @@ pub fn draw(frame: &mut Frame, app: &App, screen: &mut Screen) {
     draw_header(frame, header, app);
     match app.view {
         View::Messages => draw_messages(frame, body, app, screen),
+        View::Dms => draw_dms(frame, body, app, screen),
         View::Packets | View::Rf => lists::draw_events(frame, body, app, screen),
         View::Nodes => lists::draw_nodes(frame, body, app, screen),
         View::Alerts => lists::draw_alerts(frame, body, app, screen),
@@ -99,6 +101,24 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         }
     }
 
+    // The tabs are navigation, so they keep their room: on a narrow screen
+    // the status drops its labels and the server's address instead.
+    let tabs = Line::from(tabs);
+    let mut status = feeds_status(app, true);
+    if tabs.width() + status.width() > usize::from(area.width) {
+        status = feeds_status(app, false);
+    }
+
+    let [left, right] =
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(status.width() as u16)])
+            .areas(area);
+    frame.render_widget(tabs, left);
+    frame.render_widget(status, right);
+}
+
+/// Each stream's connection, with labels and the server's address when
+/// there's room for them.
+fn feeds_status(app: &App, verbose: bool) -> Line<'static> {
     let mut status = Vec::new();
     for (kind, label) in
         [(Kind::Messages, "msgs"), (Kind::Packets, "pkts"), (Kind::Observations, "rf")]
@@ -109,16 +129,12 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Connection::Lost(_) => Color::Red,
         };
         status.push(Span::styled("●", color));
-        status.push(Span::raw(format!(" {label}  ")).dim());
+        status.push(Span::raw(if verbose { format!(" {label}  ") } else { " ".into() }).dim());
     }
-    status.push(Span::raw(format!("{} ", app.server)).dim());
-    let status = Line::from(status);
-
-    let [left, right] =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(status.width() as u16)])
-            .areas(area);
-    frame.render_widget(Line::from(tabs), left);
-    frame.render_widget(status, right);
+    if verbose {
+        status.push(Span::raw(format!("{} ", app.server)).dim());
+    }
+    Line::from(status)
 }
 
 fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
@@ -127,6 +143,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Prompt::Filter => format!("filter {}: ", app.view.title().to_lowercase()),
             Prompt::Watch => "watch: ".to_owned(),
             Prompt::Compose => format!("message {}: ", app.channel.as_deref().unwrap_or_default()),
+            Prompt::Advert => {
+                "advertise the radio:  l  to the neighbours   f  across the mesh   Esc  cancel"
+                    .to_owned()
+            }
         };
         let mut spans =
             vec![Span::styled(label, Style::new().bold().cyan()), Span::raw(&input.text)];
@@ -164,6 +184,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                 View::Packets | View::Rf => {
                     "/ filter  w watch  Enter inspect  g/G top/end  ? help  q quit"
                 }
+                View::Dms => "Tab people  c reply  j/k scroll  ? help  q quit",
                 View::Nodes => "/ search  ? help  q quit",
                 View::Health => {
                     "from each observer's status reports; refreshed every minute  ? help"
@@ -277,6 +298,131 @@ fn draw_channels(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) 
                 Span::styled(format!(" {label}"), color),
                 Span::raw(" ".repeat(pad)),
                 Span::styled(badge, Style::new().bold().yellow()),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default().with_selected(selected.map(|index| index - rows.start));
+    let style = if app.sidebar_focus { highlight() } else { Style::new().bold() };
+    frame.render_stateful_widget(List::new(items).highlight_style(style), inner, &mut state);
+}
+
+/// Direct messages: who you've exchanged them with, and one conversation.
+fn draw_dms(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
+    let [sidebar, thread] =
+        Layout::horizontal([Constraint::Length(20), Constraint::Fill(1)]).areas(area);
+    let conversations = app.conversations();
+    let selected = app.selected_conversation(&conversations);
+    draw_correspondents(frame, sidebar, app, &conversations, selected.map(|(at, _)| at), screen);
+
+    let title = selected.map_or("Direct messages", |(_, thread)| thread.who.as_str());
+    let block = pane(Line::from(title), !app.sidebar_focus);
+    let inner = block.inner(thread);
+    frame.render_widget(block, thread);
+
+    if let Err(problem) = &app.dms {
+        frame.render_widget(Paragraph::new(problem.as_str()).red(), inner);
+        return;
+    }
+    let Some((_, conversation)) = selected else {
+        let note = "no direct messages yet\n\nOthers can write to your radio once they have it \
+                    as a contact, which they get from hearing it advertise (a).";
+        frame.render_widget(Paragraph::new(note).dim().wrap(Wrap { trim: false }), inner);
+        return;
+    };
+
+    let width = usize::from(inner.width);
+    let mut lines = Vec::new();
+    let mut previous = None;
+    for message in &conversation.messages {
+        lines.extend(dm_lines(app, message, previous, width));
+        previous = Some(message.at);
+    }
+    // The newest message sits at the bottom; j/k scrolls back from there.
+    let height = usize::from(inner.height);
+    let end = lines.len().saturating_sub(app.dm_scroll.min(lines.len().saturating_sub(1)));
+    let start = end.saturating_sub(height);
+    let shown: Vec<Line> = lines[start..end].to_vec();
+    frame.render_widget(Paragraph::new(shown), inner);
+}
+
+fn dm_lines(
+    app: &App,
+    message: &DmLine,
+    previous: Option<Timestamp>,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let who = if message.outgoing { "you" } else { "them" };
+    let prefix = vec![
+        Span::raw(day_label(app, message.at, previous)).dim(),
+        Span::raw(format!("{} ", clock(app, message.at))).dim(),
+    ];
+    let mut content = vec![Span::styled(
+        format!("{who}: "),
+        if message.outgoing {
+            Style::new().bold().cyan()
+        } else {
+            Style::new().bold().fg(name_color(who))
+        },
+    )];
+    content.push(Span::raw(message.body.clone()));
+    if let Some(note) = delivery(message) {
+        content.push(Span::raw(format!("  {note}")).dim());
+    }
+    wrap(prefix, content, width)
+}
+
+/// How a message got on: the acknowledgement for one you sent, the path for
+/// one you received.
+fn delivery(message: &DmLine) -> Option<String> {
+    if message.outgoing {
+        return match (message.status?, message.round_trip_ms) {
+            (SendStatus::Failed, _) => {
+                Some(format!("✗ {}", message.error.as_deref().unwrap_or("failed")))
+            }
+            (SendStatus::Delivered, Some(ms)) => Some(format!("✓ {:.1} s", f64::from(ms) / 1000.0)),
+            (SendStatus::Delivered, None) => Some("✓".to_owned()),
+            (SendStatus::Unacknowledged, _) => Some("no acknowledgement".to_owned()),
+            _ => Some("sending…".to_owned()),
+        };
+    }
+    match (message.hops, message.snr) {
+        (Some(hops), Some(snr)) => Some(format!("{hops} hops, SNR {snr:.1}")),
+        (Some(hops), None) => Some(format!("{hops} hops")),
+        (None, Some(snr)) => Some(format!("direct, SNR {snr:.1}")),
+        (None, None) => None,
+    }
+}
+
+fn draw_correspondents(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    conversations: &[Conversation],
+    selected: Option<usize>,
+    screen: &mut Screen,
+) {
+    let block = pane(Line::from("People"), app.sidebar_focus);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows = window(
+        conversations.len(),
+        selected,
+        usize::from(inner.height),
+        &mut screen.correspondents,
+        |_| 1,
+    );
+    let width = usize::from(inner.width);
+    let items: Vec<ListItem> = conversations[rows.clone()]
+        .iter()
+        .map(|thread| {
+            let when = ago(app, thread.last_at());
+            let label = truncate(&thread.who, width.saturating_sub(when.len() + 2));
+            let pad = width.saturating_sub(Span::raw(label.as_str()).width() + when.len() + 2);
+            ListItem::new(Line::from(vec![
+                Span::styled(format!(" {label}"), name_color(&thread.who)),
+                Span::raw(" ".repeat(pad)),
+                Span::raw(when).dim(),
             ]))
         })
         .collect();
@@ -492,7 +638,8 @@ mod tests {
     mod screens {
         use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
         use ferromesh_model::{
-            ChannelInfo, DecodeState, MessageEvent, PacketDetail, PacketEvent, PacketReception,
+            ChannelInfo, DecodeState, DirectMessageInfo, MessageEvent, PacketDetail, PacketEvent,
+            PacketReception, SentMessageInfo,
         };
         use jiff::tz::TimeZone;
         use meshcore_proto::{ChannelKey, GroupText};
@@ -500,7 +647,7 @@ mod tests {
         use ratatui::backend::TestBackend;
 
         use super::super::*;
-        use crate::tui::app::Update;
+        use crate::tui::app::{Command, Update};
 
         const HASH: &str = "0123456789ABCDEF";
 
@@ -548,9 +695,12 @@ mod tests {
 
         #[test]
         fn messages() {
-            let lines = render(&app(), 100, 6);
+            // Wide enough for the header's full status; it drops the labels
+            // and the address when the tabs need the room.
+            let lines = render(&app(), 120, 6);
             assert!(lines[0].starts_with(" ferromesh "), "{lines:#?}");
             assert!(lines[0].ends_with("● rf  mesh:7373"), "{lines:#?}");
+            assert!(render(&app(), 100, 6)[0].ends_with("● ● ●"), "narrow header keeps its tabs");
             assert!(
                 lines[2].contains("│ Sep 13 14:03:22 #wx            Bob: storm rolling in  ×3"),
                 "{lines:#?}"
@@ -613,12 +763,62 @@ mod tests {
             }
         }
 
+        #[test]
+        fn direct_messages() {
+            let mut app = app();
+            let at = app.now;
+            app.apply(Update::Dms(Ok(vec![DirectMessageInfo {
+                id: 1,
+                received_at: at,
+                to: "scw".into(),
+                sender: Some("KK4SW".into()),
+                sender_prefix: "d2aa11bb22cc".into(),
+                hops: Some(2),
+                txt_type: 0,
+                sender_timestamp: at,
+                snr: Some(-3.0),
+                body: "are you there?".into(),
+            }])));
+            app.apply(Update::SentDms(vec![SentMessageInfo {
+                id: 2,
+                sent_at: at,
+                from: "scw".into(),
+                to: "KK4SW".into(),
+                direct: true,
+                body: "here now".into(),
+                sender_timestamp: at,
+                status: SendStatus::Delivered,
+                error: None,
+                round_trip_ms: Some(600),
+                heard: 0,
+                heard_by: Vec::new(),
+                packet_hash: None,
+            }]));
+
+            press(&mut app, KeyCode::Char('2'));
+            let lines = render(&app, 100, 20).join("\n");
+            for expected in
+                ["People", "KK4SW", "them: are you there?", "2 hops", "you: here now", "✓ 0.6 s"]
+            {
+                assert!(lines.contains(expected), "{expected:?} missing from\n{lines}");
+            }
+
+            // c replies to whoever the conversation is with.
+            press(&mut app, KeyCode::Char('c'));
+            for key in "yes".chars() {
+                press(&mut app, KeyCode::Char(key));
+            }
+            let sent =
+                app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+            assert_eq!(sent, [Command::Send { to: "KK4SW".into(), text: "yes".into() }]);
+        }
+
         /// Every view and overlay draws, even on the smallest screen.
         #[test]
         fn every_view_at_any_size() {
             for (width, height) in [(40, 10), (100, 30)] {
                 let mut app = app();
-                for key in ['1', '2', '3', '4', '5', '6'] {
+                for key in ['1', '2', '3', '4', '5', '6', '7'] {
                     press(&mut app, KeyCode::Char(key));
                     render(&app, width, height);
                     press(&mut app, KeyCode::Char('?'));

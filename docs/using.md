@@ -66,6 +66,26 @@ ferromesh send '#test' quick --follow 0       # don't wait around
 
 A channel must be added before you can send to it, and a node must have been heard advertising before you can address it.
 
+## Advertising your radio
+
+Other nodes can only message a radio they have as a contact, and they add one
+by hearing it advertise. After a new radio, a rename, or a move:
+
+```sh
+ferromesh advert                  # to the radios that hear it directly
+ferromesh advert --flood          # across the whole mesh
+ferromesh advert --follow 0       # don't wait to see who heard it
+```
+
+Afterwards it watches for the advert coming back through the observers and
+prints who heard it, at how many hops and at what signal, for 20 seconds by
+default.
+
+A flood advert is relayed by every node in range of every hop, so it costs the
+whole mesh airtime. Use it when you want to be reachable from far away, and the
+plain one otherwise. Two floods in a row are almost always a mistake, so the
+server refuses a second within a minute of the first.
+
 ## Health
 
 ```sh
@@ -103,20 +123,23 @@ Hashtag channels derive their key from the name, which is why guessing works; pr
 ferromesh tui
 ```
 
-Six views, switched with `1` to `6`:
+Seven views, switched with `1` to `7`:
 
 | | |
 |---|---|
 | **1 Messages** | A channel list with unread counts, and each message once with how many times it was heard |
-| **2 Packets** | Every distinct packet, decoded where possible |
-| **3 RF** | Every reception, with signal strength and path, naming repeaters where a hop prefix identifies one |
-| **4 Nodes** | Every node that has advertised |
-| **5 Alerts** | Your watches, and new traffic that matched them |
-| **6 Health** | Each observer's battery, noise floor, traffic and delivery, with trends and warnings |
+| **2 DMs** | Direct messages, as a conversation per person: what they sent, what you sent, and whether it was acknowledged |
+| **3 Packets** | Every distinct packet, decoded where possible |
+| **4 RF** | Every reception, with signal strength and path, naming repeaters where a hop prefix identifies one |
+| **5 Nodes** | Every node that has advertised |
+| **6 Alerts** | Your watches, and new traffic that matched them |
+| **7 Health** | Each observer's battery, noise floor, traffic and delivery, with trends and warnings |
 
 Keys:
 
-- `c` composes a message to the selected channel (needs the token).
+- `c` composes: a message to the selected channel, or a reply in the conversation the DM view is showing (needs the token).
+- `Tab` moves between the channel list and the feed, or the people list and the conversation in DMs.
+- `a` advertises the radio, then `l` for its neighbours or `f` for the whole mesh (needs the token).
 - `Enter` opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field.
 - `/` filters the current view, with the filter language above.
 - `w` saves the current filter as a watch. Matching traffic is highlighted, and new matches ring the bell and land in Alerts.
@@ -128,5 +151,5 @@ Watches are kept in `~/.config/ferromesh/watches.toml`.
 For scripting or a screenshot, the TUI can render one screen as plain text and exit:
 
 ```sh
-ferromesh tui --snapshot --size 120x40 --keys '3<enter>'
+ferromesh tui --snapshot --size 120x40 --keys '4<enter>'
 ```

@@ -58,9 +58,12 @@ These need a companion radio on the server; without one they answer 503.
 GET  /api/v1/direct?limit=        # direct messages to the radio, newest first
 POST /api/v1/send                 # {"to": "#test" | "KK4SW" | "4d1727", "text": "..."}   (token)
 GET  /api/v1/outbox?limit=        # what was sent, with who heard it or whether it was acked
+POST /api/v1/advert               # {"flood": false}   (token)
 GET  /api/v1/contacts             # the radio's contacts
 POST /api/v1/contacts             # {"to": ..., "pinned": true}   (token)
 ```
+
+`POST /api/v1/advert` makes the radio advertise itself, so other nodes can add it as a contact. It answers 201 with the radio's key and name; watch for the advert arriving by querying observations for `type:advert node:<key prefix>`. A flood advert is refused within a minute of the last one.
 
 `POST /api/v1/send` answers 201 with the message's outbox entry, once the radio has accepted it and the record is stored. Follow what happens to it in the outbox: a channel message collects the observers that heard it, a direct message collects its acknowledgement and round-trip time.
 

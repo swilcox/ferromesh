@@ -178,15 +178,16 @@ fn row(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("1-6", "messages, packets, RF, nodes, alerts, health"),
-    ("Tab", "channel list (messages), watch list (alerts)"),
+    ("1-7", "messages, DMs, packets, RF, nodes, alerts, health"),
+    ("Tab", "channels (messages), people (DMs), watches (alerts)"),
     ("j k ↑ ↓", "move; PgUp PgDn by a page"),
     ("g Home", "oldest loaded; again to load older"),
     ("G End", "back to following the newest"),
     ("Enter", "inspect the selected packet"),
     ("/", "filter this view, Esc clears it"),
     ("w", "watch a filter: highlight and alert"),
-    ("c", "compose to the selected channel"),
+    ("c", "compose: to the selected channel, or a reply in DMs"),
+    ("a", "advertise the radio (l neighbours, f mesh)"),
     ("d", "delete the selected watch"),
     ("c", "clear alerts"),
     ("b", "bell on or off"),

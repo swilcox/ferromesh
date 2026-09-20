@@ -9,7 +9,7 @@ use ferromesh_model::{RadioContact, SendStatus, SentMessageInfo};
 use ferromesh_store::{ChannelKind, Store};
 use ferromeshd::api::{self, AppState};
 use ferromeshd::companion::session::{Identity, Received};
-use ferromeshd::companion::{Accepted, Request, SendError, record};
+use ferromeshd::companion::{Accepted, Advertised, Request, SendError, record};
 use ferromeshd::rawlog::{RawLogWriter, RawRecord};
 use ferromeshd::writer::{self, Job};
 use jiff::Timestamp;
@@ -134,6 +134,16 @@ fn fake_radio(requests: std::sync::mpsc::Receiver<Request>, jobs: mpsc::Sender<J
                     );
                     (record, reply, Ok(()))
                 }
+            }
+            Request::Advert { flood, reply } => {
+                let record = record::advert(&identity, "companion:fake", now, flood, None);
+                jobs.blocking_send(Job::Record(record)).unwrap();
+                let _ = reply.send(Ok(Advertised {
+                    pubkey: identity.info.pubkey,
+                    name: identity.info.name.clone(),
+                    flood,
+                }));
+                continue;
             }
             Request::Contacts { .. } | Request::Pin { .. } => unreachable!("answered above"),
         };

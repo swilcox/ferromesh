@@ -24,7 +24,7 @@ pub use filter::{Filter, FilterError};
 pub use health::{
     DEFAULT_HEALTH_HOURS, HealthHour, HealthQuery, MAX_HEALTH_HOURS, ObserverHealth, ObserverState,
 };
-pub use radio::{PinRequest, RadioContact};
+pub use radio::{AdvertRequest, AdvertSent, PinRequest, RadioContact};
 pub use send::{MAX_OUTBOX, OutboxQuery, SendRequest, SendStatus, SentMessageInfo};
 pub use wire::{
     DEFAULT_HISTORY_LIMIT, DEFAULT_PORT, Frame, Health, HistoryQuery, MAX_HISTORY_LIMIT,

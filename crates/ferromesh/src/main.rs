@@ -1,5 +1,6 @@
 //! ferromesh: the command-line client for a ferromeshd server.
 
+mod advert;
 mod channels;
 mod config;
 mod contacts;
@@ -105,6 +106,17 @@ enum Command {
         #[arg(required = true)]
         text: Vec<String>,
         /// Seconds to follow the message afterwards; 0 returns at once.
+        #[arg(long, default_value_t = 20)]
+        follow: u64,
+    },
+    /// Advertise the server's companion radio, so other nodes can add it as
+    /// a contact, then watch which observers hear it.
+    Advert {
+        /// Send it across the mesh, rather than only to the radios that
+        /// hear it directly. Every node relays it, so use it sparingly.
+        #[arg(long)]
+        flood: bool,
+        /// Seconds to watch for it afterwards; 0 returns at once.
         #[arg(long, default_value_t = 20)]
         follow: u64,
     },
@@ -261,6 +273,9 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Send { to, text, follow } => {
             send::send(&server, to, text.join(" "), token, Duration::from_secs(follow)).await
+        }
+        Command::Advert { flood, follow } => {
+            advert::advert(&server, flood, token, Duration::from_secs(follow)).await
         }
         Command::Dms { limit, json } => direct::list(&server, limit, json).await,
         Command::Health { hours, json } => health::show(&server, hours, json).await,
