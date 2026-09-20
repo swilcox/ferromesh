@@ -1,8 +1,10 @@
 # ferromeshd configuration. Copy to ferromesh.toml and adjust.
 
-# Holds ferromesh.db and the raw/ MQTT log. In the container this is the /data volume.
+# Holds ferromesh.db and the raw/ log. In the container this is the /data volume.
 data_dir = "/data"
 
+# Where to record from: a broker, a companion radio, or both. At least one is
+# required. Delete this whole section to run from a companion radio alone.
 [mqtt]
 # Inside the container (host networking) a broker on the same machine is 127.0.0.1:
 # .local names don't resolve in containers. From another machine use truffles.local.

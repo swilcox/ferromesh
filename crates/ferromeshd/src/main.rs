@@ -1,4 +1,5 @@
-//! ferromeshd: records MeshCore traffic from MQTT and serves it to clients.
+//! ferromeshd: records MeshCore traffic from a broker, a companion radio,
+//! or both, and serves it to clients.
 
 use std::path::PathBuf;
 
@@ -21,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Subscribe to MQTT, record everything that arrives, and serve the API.
+    /// Record everything the configured sources hear, and serve the API.
     Serve,
     /// Load a JSONL capture written by the Python mqtt_observer watcher.
     Import {

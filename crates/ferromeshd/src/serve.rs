@@ -1,5 +1,5 @@
-//! `ferromeshd serve`: subscribe to MQTT, read the companion radio if there is
-//! one, feed the writer, and serve the API.
+//! `ferromeshd serve`: subscribe to MQTT if a broker is configured, read the
+//! companion radio if there is one, feed the writer, and serve the API.
 
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use tracing::{info, warn};
 
 use crate::api::{self, AppState};
 use crate::companion::Companion;
-use crate::config::Config;
+use crate::config::{Config, MqttConfig};
 use crate::pipeline;
 use crate::rawlog::{RawLogWriter, RawRecord};
 use crate::writer::{self, Job};
@@ -51,7 +51,13 @@ pub async fn run(config: Config) -> Result<()> {
         .name("writer".into())
         .spawn(move || writer::run(store, raw, queue, events))?;
 
-    let subscribed = subscribe(&config, jobs).await;
+    let subscribed = match &config.mqtt {
+        Some(mqtt) => subscribe(mqtt, jobs).await,
+        None => {
+            info!("no [mqtt] broker configured; recording from the companion radio alone");
+            wait_for_stop(jobs).await
+        }
+    };
     // Stopping the companion and then the API releases their handles on the
     // writer, which then drains what's queued and stops.
     if let Some(companion) = companion {
@@ -63,8 +69,21 @@ pub async fn run(config: Config) -> Result<()> {
     written.and(subscribed).and(served)
 }
 
-async fn subscribe(config: &Config, jobs: mpsc::Sender<Job>) -> Result<()> {
-    let mqtt = &config.mqtt;
+/// With no broker to subscribe to, waits for Ctrl-C or SIGTERM instead. It
+/// takes the writer handle, as [`subscribe`] does, because the writer only
+/// finishes once every sender has been dropped.
+async fn wait_for_stop(jobs: mpsc::Sender<Job>) -> Result<()> {
+    let mut terminate = signal(SignalKind::terminate())?;
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = terminate.recv() => {}
+    }
+    drop(jobs);
+    info!("shutting down");
+    Ok(())
+}
+
+async fn subscribe(mqtt: &MqttConfig, jobs: mpsc::Sender<Job>) -> Result<()> {
     let source = format!("mqtt://{}:{}", mqtt.host, mqtt.port);
     let mut options = MqttOptions::new(&mqtt.client_id, &mqtt.host, mqtt.port);
     options.set_keep_alive(Duration::from_secs(30));
