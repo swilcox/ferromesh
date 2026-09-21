@@ -48,6 +48,8 @@ ferromesh contacts pin Tanyard
 ferromesh contacts unpin Tanyard
 ```
 
+The TUI's Contacts view (`8`) shows the same list, with `p` to keep a contact or let it go and `c` to write to one. It orders contacts the way the radio does — favourites first, then by the timestamp inside each one's last advert — and marks the one the radio would replace next. That timestamp is the sender's own clock, so a node whose clock is years out is first to go however recently it was really heard; ours currently points at one claiming 2024.
+
 **Rescue.** A companion can only decrypt a direct message from a node it has as a contact. If a message arrives that the radio can't read, because it has never heard the sender or has since forgotten them, ferromesh adds every node in its own records that could have sent it, so the sender's automatic retry can be read. This is why a first message from a stranger usually lands on their second try.
 
 ## Limits worth knowing

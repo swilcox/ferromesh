@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ferromesh_model::{
     ChannelInfo, DirectMessageInfo, Event, Filter, FilterError, Kind, NodeInfo, ObserverHealth,
-    PacketDetail, SendStatus, SentMessageInfo,
+    PacketDetail, RadioContact, SendStatus, SentMessageInfo,
 };
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -31,10 +31,12 @@ pub enum View {
     Nodes,
     Alerts,
     Health,
+    /// The companion radio's own contact list.
+    Contacts,
 }
 
 impl View {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Messages,
         Self::Dms,
         Self::Packets,
@@ -42,6 +44,7 @@ impl View {
         Self::Nodes,
         Self::Alerts,
         Self::Health,
+        Self::Contacts,
     ];
 
     pub const fn title(self) -> &'static str {
@@ -53,6 +56,7 @@ impl View {
             Self::Nodes => "Nodes",
             Self::Alerts => "Alerts",
             Self::Health => "Health",
+            Self::Contacts => "Contacts",
         }
     }
 
@@ -62,7 +66,7 @@ impl View {
             Self::Messages => Some(Kind::Messages),
             Self::Packets => Some(Kind::Packets),
             Self::Rf => Some(Kind::Observations),
-            Self::Dms | Self::Nodes | Self::Alerts | Self::Health => None,
+            Self::Dms | Self::Nodes | Self::Alerts | Self::Health | Self::Contacts => None,
         }
     }
 }
@@ -218,6 +222,11 @@ pub enum Command {
     Advert {
         flood: bool,
     },
+    /// Keep a node on the radio's contact list, or let it go.
+    Pin {
+        to: String,
+        pinned: bool,
+    },
 }
 
 /// News from the network side.
@@ -234,6 +243,8 @@ pub enum Update {
     Dms(Result<Vec<DirectMessageInfo>, String>),
     /// Direct messages sent, newest first.
     SentDms(Vec<SentMessageInfo>),
+    /// The radio's contacts, or why they couldn't be fetched.
+    Contacts(Result<Vec<RadioContact>, String>),
     Detail(String, Result<PacketDetail, String>),
     Older {
         kind: Kind,
@@ -269,6 +280,9 @@ pub struct App {
     pub correspondent: Option<String>,
     /// Lines the conversation is scrolled back from its newest message.
     pub dm_scroll: usize,
+    /// The radio's contacts, or why they couldn't be fetched.
+    pub contacts: Result<Vec<RadioContact>, String>,
+    pub contact_selected: usize,
     /// Node names by lowercase public-key prefix of 1–3 bytes, `None` where
     /// the prefix is ambiguous or the node unnamed.
     hop_names: HashMap<String, Option<String>>,
@@ -316,6 +330,8 @@ impl App {
             sent_dms: Vec::new(),
             correspondent: None,
             dm_scroll: 0,
+            contacts: Ok(Vec::new()),
+            contact_selected: 0,
             hop_names: HashMap::new(),
             channel: None,
             sidebar_focus: false,
@@ -534,12 +550,82 @@ impl App {
     /// selected channel in the messages view.
     pub fn compose_target(&self) -> Option<String> {
         match self.view {
+            View::Contacts => self.selected_contact().map(|contact| contact.name.clone()),
             View::Dms => {
                 let conversations = self.conversations();
                 self.selected_conversation(&conversations).map(|(_, thread)| thread.who.clone())
             }
             _ => self.channel.clone(),
         }
+    }
+
+    /// The radio's contacts, favourites first and then the most recently
+    /// heard, so the last non-favourite is the one the radio replaces next.
+    pub fn visible_contacts(&self) -> Vec<&RadioContact> {
+        let needle = self.filters.get(&View::Contacts).map(|filter| filter.text.to_lowercase());
+        let mut contacts: Vec<&RadioContact> = self
+            .contacts
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|contact| {
+                needle.as_ref().is_none_or(|needle| {
+                    [contact.name.as_str(), contact.kind.as_str(), contact.pubkey.as_str()]
+                        .iter()
+                        .any(|field| field.to_lowercase().contains(needle.as_str()))
+                })
+            })
+            .collect();
+        contacts.sort_by(|a, b| {
+            b.favourite
+                .cmp(&a.favourite)
+                .then_with(|| b.last_advert.cmp(&a.last_advert))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+        contacts
+    }
+
+    /// The contact the radio would replace to make room: the one it heard
+    /// from least recently that isn't a favourite.
+    pub fn next_replaced(&self) -> Option<&str> {
+        self.contacts
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter(|contact| !contact.favourite)
+            .min_by_key(|contact| contact.last_advert)
+            .map(|contact| contact.pubkey.as_str())
+    }
+
+    fn selected_contact(&self) -> Option<&RadioContact> {
+        let contacts = self.visible_contacts();
+        contacts.get(self.contact_selected.min(contacts.len().saturating_sub(1))).copied()
+    }
+
+    /// Pins or unpins what's selected: a contact in the contacts view, or a
+    /// node in the nodes view, which adds it to the radio.
+    fn pin_selected(&mut self) -> Vec<Command> {
+        let (to, pinned, what) = match self.view {
+            View::Contacts => match self.selected_contact() {
+                Some(contact) => (contact.name.clone(), !contact.favourite, contact.name.clone()),
+                None => return Vec::new(),
+            },
+            View::Nodes => {
+                let nodes = self.visible_nodes();
+                let Some(node) = nodes.get(self.node_selected) else {
+                    return Vec::new();
+                };
+                let to = node.name.clone().unwrap_or_else(|| node.pubkey[..12].to_owned());
+                (to.clone(), true, to)
+            }
+            _ => return Vec::new(),
+        };
+        self.status = Some(if pinned {
+            format!("keeping {what} on the radio…")
+        } else {
+            format!("letting the radio replace {what} when it needs room…")
+        });
+        vec![Command::Pin { to, pinned }]
     }
 
     pub fn apply(&mut self, update: Update) {
@@ -568,6 +654,7 @@ impl App {
             Update::Health(health) => self.health = health,
             Update::Dms(dms) => self.dms = dms,
             Update::SentDms(sent) => self.sent_dms = sent,
+            Update::Contacts(contacts) => self.contacts = contacts,
             Update::Nodes(nodes) => {
                 self.hop_names.clear();
                 for node in &nodes {
@@ -717,7 +804,7 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char(digit @ '1'..='7') => {
+            KeyCode::Char(digit @ '1'..='8') => {
                 self.show(View::ALL[usize::from(digit as u8 - b'1')])
             }
             KeyCode::Char('?') => self.help = true,
@@ -754,10 +841,15 @@ impl App {
                 self.alerts.clear();
                 self.alert_selected = 0;
             }
-            KeyCode::Char('c') if matches!(self.view, View::Messages | View::Dms) => {
+            KeyCode::Char('c')
+                if matches!(self.view, View::Messages | View::Dms | View::Contacts) =>
+            {
                 self.prompt(Prompt::Compose);
             }
             KeyCode::Char('a') => self.prompt(Prompt::Advert),
+            KeyCode::Char('p') if matches!(self.view, View::Contacts | View::Nodes) => {
+                return self.pin_selected();
+            }
             _ => {}
         }
         Vec::new()
@@ -774,10 +866,17 @@ impl App {
     fn follow(&mut self) {
         match self.view.kind() {
             Some(kind) => self.cursors[slot(kind)] = None,
-            None => {
-                self.node_selected = 0;
-                self.alert_selected = 0;
-            }
+            // A plain list has no newest to follow, so End goes to its end.
+            None => match self.view {
+                View::Contacts => {
+                    self.contact_selected = self.visible_contacts().len().saturating_sub(1);
+                }
+                View::Nodes => self.node_selected = self.visible_nodes().len().saturating_sub(1),
+                _ => {
+                    self.node_selected = 0;
+                    self.alert_selected = 0;
+                }
+            },
         }
         if self.view == View::Messages {
             let channel = self.channel.clone();
@@ -805,6 +904,11 @@ impl App {
                 // that grows while you read keeps its place.
                 let back = -delta;
                 self.dm_scroll = self.dm_scroll.saturating_add_signed(back);
+                Vec::new()
+            }
+            View::Contacts => {
+                let last = self.visible_contacts().len().saturating_sub(1);
+                self.contact_selected = step(self.contact_selected, delta, last);
                 Vec::new()
             }
             View::Nodes => {
@@ -907,7 +1011,9 @@ impl App {
     }
 
     fn prompt(&mut self, prompt: Prompt) {
-        if prompt == Prompt::Watch && matches!(self.view, View::Dms | View::Nodes | View::Health) {
+        if prompt == Prompt::Watch
+            && matches!(self.view, View::Dms | View::Nodes | View::Health | View::Contacts)
+        {
             self.status = Some("watches apply to messages, packets and RF".into());
             return;
         }

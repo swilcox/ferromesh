@@ -123,7 +123,7 @@ Hashtag channels derive their key from the name, which is why guessing works; pr
 ferromesh tui
 ```
 
-Seven views, switched with `1` to `7`:
+Eight views, switched with `1` to `8`:
 
 | | |
 |---|---|
@@ -134,11 +134,14 @@ Seven views, switched with `1` to `7`:
 | **5 Nodes** | Every node that has advertised |
 | **6 Alerts** | Your watches, and new traffic that matched them |
 | **7 Health** | Each observer's battery, noise floor, traffic and delivery, with trends and warnings |
+| **8 Contacts** | The companion radio's own contact list, favourites first, marking the one it would replace next |
 
 Keys:
 
-- `c` composes: a message to the selected channel, or a reply in the conversation the DM view is showing (needs the token).
+- `c` composes: a message to the selected channel, a reply in the conversation the DM view is showing, or a message to the selected contact (needs the token).
 - `Tab` moves between the channel list and the feed, or the people list and the conversation in DMs.
+- `p` keeps a contact on the radio, or lets it go again; in the Nodes view it adds the selected node as a kept contact (needs the token).
+- `a` advertises the radio: `l` to its neighbours, `f` across the mesh (needs the token).
 - `a` advertises the radio, then `l` for its neighbours or `f` for the whole mesh (needs the token).
 - `Enter` opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field.
 - `/` filters the current view, with the filter language above.

@@ -19,7 +19,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use ferromesh_model::{
     AdvertRequest, AdvertSent, ChannelInfo, DirectMessageInfo, Event, HistoryQuery, Kind,
-    MAX_NODES, NodeInfo, ObserverHealth, PacketDetail, SendRequest, SentMessageInfo,
+    MAX_NODES, NodeInfo, ObserverHealth, PacketDetail, PinRequest, RadioContact, SendRequest,
+    SentMessageInfo,
 };
 use futures_util::StreamExt;
 use jiff::Timestamp;
@@ -257,6 +258,24 @@ impl Network {
                         updates.send(Update::Status(format!("couldn't save watches: {error:#}")));
                 }
             }
+            Command::Pin { to, pinned } => {
+                let token = self.token.clone();
+                let updates_after = updates.clone();
+                tokio::spawn(async move {
+                    let request = PinRequest { to: to.clone(), pinned };
+                    let result: Result<RadioContact> =
+                        server.post("/api/v1/contacts", &request, token.as_deref()).await;
+                    let status = match (result, pinned) {
+                        (Ok(contact), true) => format!("the radio keeps {}", contact.name),
+                        (Ok(contact), false) => {
+                            format!("{} can be replaced when the radio needs room", contact.name)
+                        }
+                        (Err(error), _) => format!("couldn't change {to}: {error:#}"),
+                    };
+                    let _ = updates.send(Update::Status(status));
+                    fetch_contacts(&server, &updates_after).await;
+                });
+            }
             Command::Advert { flood } => {
                 let token = self.token.clone();
                 tokio::spawn(async move {
@@ -321,6 +340,15 @@ async fn fetch_lists(server: &Server, updates: &UnboundedSender<Update>) {
         .map_err(|error| format!("{error:#}"));
     let _ = updates.send(Update::Health(health));
     fetch_dms(server, updates).await;
+    fetch_contacts(server, updates).await;
+}
+
+async fn fetch_contacts(server: &Server, updates: &UnboundedSender<Update>) {
+    let contacts = server
+        .get::<Vec<RadioContact>>("/api/v1/contacts")
+        .await
+        .map_err(|error| format!("{error:#}"));
+    let _ = updates.send(Update::Contacts(contacts));
 }
 
 async fn fetch_dms(server: &Server, updates: &UnboundedSender<Update>) {

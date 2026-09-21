@@ -34,6 +34,7 @@ const PALETTE: [Color; 10] = [
 pub struct Screen {
     pub channels: usize,
     pub correspondents: usize,
+    pub contacts: usize,
     pub messages: usize,
     pub packets: usize,
     pub rf: usize,
@@ -54,6 +55,7 @@ pub fn draw(frame: &mut Frame, app: &App, screen: &mut Screen) {
         View::Nodes => lists::draw_nodes(frame, body, app, screen),
         View::Alerts => lists::draw_alerts(frame, body, app, screen),
         View::Health => lists::draw_health(frame, body, app),
+        View::Contacts => lists::draw_contacts(frame, body, app, screen),
     }
     draw_footer(frame, footer, app);
     if let Some(inspector) = &app.inspector {
@@ -185,7 +187,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
                     "/ filter  w watch  Enter inspect  g/G top/end  ? help  q quit"
                 }
                 View::Dms => "Tab people  c reply  j/k scroll  ? help  q quit",
-                View::Nodes => "/ search  ? help  q quit",
+                View::Nodes => "/ search  p keep as a contact  ? help  q quit",
+                View::Contacts => {
+                    "p keep or release  c write  / search  a advertise  ? help  q quit"
+                }
                 View::Health => {
                     "from each observer's status reports; refreshed every minute  ? help"
                 }
@@ -639,7 +644,7 @@ mod tests {
         use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
         use ferromesh_model::{
             ChannelInfo, DecodeState, DirectMessageInfo, MessageEvent, PacketDetail, PacketEvent,
-            PacketReception, SentMessageInfo,
+            PacketReception, RadioContact, SentMessageInfo,
         };
         use jiff::tz::TimeZone;
         use meshcore_proto::{ChannelKey, GroupText};
@@ -697,7 +702,7 @@ mod tests {
         fn messages() {
             // Wide enough for the header's full status; it drops the labels
             // and the address when the tabs need the room.
-            let lines = render(&app(), 120, 6);
+            let lines = render(&app(), 140, 6);
             assert!(lines[0].starts_with(" ferromesh "), "{lines:#?}");
             assert!(lines[0].ends_with("● rf  mesh:7373"), "{lines:#?}");
             assert!(render(&app(), 100, 6)[0].ends_with("● ● ●"), "narrow header keeps its tabs");
@@ -813,12 +818,62 @@ mod tests {
             assert_eq!(sent, [Command::Send { to: "KK4SW".into(), text: "yes".into() }]);
         }
 
+        #[test]
+        fn contacts() {
+            let mut app = app();
+            let at = app.now;
+            let contact =
+                |name: &str, favourite: bool, minutes: i64, hops: Option<u8>| RadioContact {
+                    pubkey: format!("{:02x}", name.len()).repeat(16),
+                    name: name.into(),
+                    kind: "chat".into(),
+                    favourite,
+                    last_advert: Some(at - jiff::SignedDuration::from_mins(minutes)),
+                    route_hops: hops,
+                };
+            app.apply(Update::Contacts(Ok(vec![
+                contact("KK4SW", true, 400, Some(2)),
+                contact("Recent", false, 5, None),
+                contact("Stale One", false, 900, Some(1)),
+            ])));
+
+            press(&mut app, KeyCode::Char('8'));
+            let lines = render(&app, 110, 12).join("\n");
+            for expected in ["Contacts (3 on the radio)", "★", "KK4SW", "kept", "next out", "flood"]
+            {
+                assert!(lines.contains(expected), "{expected:?} missing from\n{lines}");
+            }
+            // Favourites first, then whoever was heard most recently; the
+            // radio replaces the last of those.
+            let order: Vec<&str> = lines
+                .lines()
+                .filter_map(|line| {
+                    ["KK4SW", "Recent", "Stale One"]
+                        .iter()
+                        .find(|name| line.contains(*name))
+                        .copied()
+                })
+                .collect();
+            assert_eq!(order, ["KK4SW", "Recent", "Stale One"], "{lines}");
+
+            // p releases a favourite, and keeps one that isn't.
+            assert_eq!(
+                app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))),
+                [Command::Pin { to: "KK4SW".into(), pinned: false }]
+            );
+            press(&mut app, KeyCode::Down);
+            assert_eq!(
+                app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))),
+                [Command::Pin { to: "Recent".into(), pinned: true }]
+            );
+        }
+
         /// Every view and overlay draws, even on the smallest screen.
         #[test]
         fn every_view_at_any_size() {
             for (width, height) in [(40, 10), (100, 30)] {
                 let mut app = app();
-                for key in ['1', '2', '3', '4', '5', '6', '7'] {
+                for key in ['1', '2', '3', '4', '5', '6', '7', '8'] {
                     press(&mut app, KeyCode::Char(key));
                     render(&app, width, height);
                     press(&mut app, KeyCode::Char('?'));
