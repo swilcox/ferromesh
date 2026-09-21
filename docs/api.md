@@ -74,4 +74,4 @@ GET /api/v1/health                # the server itself: version, liveness
 GET /api/v1/observers?hours=      # every observer: figures, hourly history, warnings
 ```
 
-`hours` defaults to 24 and allows up to 31 days. Each observer comes back with its current state (online, stale, offline), battery, noise floor, traffic and airtime figures, a delivery share, plain-language warnings, and an hourly history covering the window.
+`hours` defaults to 24 and allows up to 31 days. Each observer comes back with its current state (online, stale, offline), how ferromesh hears from it (`kind`: `mqtt` or `companion`), battery, noise floor, traffic and airtime figures, a delivery share, plain-language warnings, and an hourly history covering the window.

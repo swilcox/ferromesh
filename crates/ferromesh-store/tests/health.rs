@@ -2,7 +2,7 @@
 //! delivery check against stored receptions, and warnings.
 
 use ferromesh_model::ObserverState;
-use ferromesh_store::{ObserverInfo, Reception, StatusReport, Store};
+use ferromesh_store::{ObserverInfo, ObserverKind, Reception, StatusReport, Store};
 
 const MINUTE: i64 = 60_000_000;
 /// Up for about 11 days when the reports start.
@@ -11,7 +11,12 @@ const UP: i64 = 1_000_000;
 const T0: i64 = 1_789_002_000 * 1_000_000;
 
 fn tanyard() -> ObserverInfo {
-    ObserverInfo { pubkey: [1; 32], name: Some("Tanyard".into()), iata: Some("BNA".into()) }
+    ObserverInfo {
+        pubkey: [1; 32],
+        name: Some("Tanyard".into()),
+        iata: Some("BNA".into()),
+        kind: ObserverKind::Mqtt,
+    }
 }
 
 /// The report after `n` five-minute intervals: 10 packets received, 4 sent
@@ -144,4 +149,69 @@ fn restarts_and_silence() {
     assert_eq!(health.state, ObserverState::Offline);
     assert_eq!(health.warnings[0], "no report for 3 h 0 min");
     assert_eq!(health.received_per_hour, None, "no reports in the window");
+}
+
+#[test]
+fn a_companion_radio_is_judged_by_what_it_can_report() {
+    // A companion never hands over a packet larger than 173 bytes, so its
+    // delivery share can't reach 100%; only a wider shortfall is a warning.
+    let scw = || ObserverInfo {
+        pubkey: [2; 32],
+        name: Some("scw".into()),
+        iata: None,
+        kind: ObserverKind::Companion,
+    };
+    let report = |n: i64| StatusReport {
+        observer: scw(),
+        packets_received: Some(100 * n),
+        ..report(n, UP + n * 300, -75)
+    };
+    // Spaced to fit inside the five minutes between reports.
+    let reception = |n: i64, k: i64| Reception {
+        observer: scw(),
+        rx_at: T0 + (n - 1) * 5 * MINUTE + (k + 1) * 3_000_000,
+        ..reception(n, k)
+    };
+
+    let mut store = Store::open_in_memory().unwrap();
+    store
+        .write(|batch| {
+            for n in 0..=3 {
+                batch.record_status(&report(n))?;
+                if n > 0 {
+                    // 96 of every 100 counted reach the server.
+                    for k in 0..96 {
+                        batch.record_reception(&reception(n, k))?;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    let now = T0 + 3 * 5 * MINUTE;
+    let health = &store.observer_health(now, 3).unwrap()[0];
+    assert_eq!((health.kind.as_str(), health.counted, health.stored), ("companion", 300, 288));
+    assert!(
+        !health.warnings.iter().any(|warning| warning.contains("reached ferromesh")),
+        "96% is within what a companion can report: {:?}",
+        health.warnings
+    );
+
+    // A real shortfall still shows, and says why some of it is expected.
+    store
+        .write(|batch| {
+            batch.record_status(&report(4))?;
+            for k in 0..20 {
+                batch.record_reception(&reception(4, k))?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let health = &store.observer_health(T0 + 4 * 5 * MINUTE, 3).unwrap()[0];
+    let warning = health
+        .warnings
+        .iter()
+        .find(|warning| warning.contains("reached ferromesh"))
+        .unwrap_or_else(|| panic!("no delivery warning: {:?}", health.warnings));
+    assert!(warning.contains("over 173 bytes"), "{warning}");
 }

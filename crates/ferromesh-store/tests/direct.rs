@@ -1,12 +1,17 @@
 //! Direct messages handed over by a companion radio.
 
 use ed25519_dalek::{Signer, SigningKey};
-use ferromesh_store::{DirectMessage, ObserverInfo, Reception, Store};
+use ferromesh_store::{DirectMessage, ObserverInfo, ObserverKind, Reception, Store};
 
 const T0: i64 = 1_789_000_000_000_000;
 
 fn companion() -> ObserverInfo {
-    ObserverInfo { pubkey: [7; 32], name: Some("desk".into()), iata: None }
+    ObserverInfo {
+        pubkey: [7; 32],
+        name: Some("desk".into()),
+        iata: None,
+        kind: ObserverKind::Companion,
+    }
 }
 
 fn direct(received_at: i64, sender_prefix: [u8; 6], body: &str, snr: f64) -> DirectMessage {

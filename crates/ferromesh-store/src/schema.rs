@@ -201,6 +201,13 @@ CREATE INDEX sent_messages_by_ack ON sent_messages (observer_id, expected_ack);
 -- Health checks read one observer's receptions over a time window.
 CREATE INDEX observations_by_observer ON observations (observer_id, rx_at);
 "#,
+    r#"
+-- How we hear from an observer: `mqtt` for one publishing to a broker,
+-- `companion` for a radio on our own USB port. A companion can't report a
+-- packet over 173 bytes, so its delivery share is judged differently.
+-- NULL until the observer is heard from again.
+ALTER TABLE observers ADD COLUMN kind TEXT;
+"#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {

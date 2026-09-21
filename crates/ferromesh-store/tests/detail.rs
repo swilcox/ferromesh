@@ -1,11 +1,16 @@
 //! Nodes, and packet detail with every reception's frame rebuilt.
 
 use ed25519_dalek::{Signer, SigningKey};
-use ferromesh_store::{ChannelKind, ObserverInfo, Reception, Store};
+use ferromesh_store::{ChannelKind, ObserverInfo, ObserverKind, Reception, Store};
 use meshcore_proto::{ChannelKey, GroupText, Packet};
 
 fn observer(seed: u8, name: &str) -> ObserverInfo {
-    ObserverInfo { pubkey: [seed; 32], name: Some(name.into()), iata: Some("BNA".into()) }
+    ObserverInfo {
+        pubkey: [seed; 32],
+        name: Some(name.into()),
+        iata: Some("BNA".into()),
+        kind: ObserverKind::Mqtt,
+    }
 }
 
 fn reception(index: usize, observer: &ObserverInfo, frame: &[u8], snr: f64) -> Reception {

@@ -32,8 +32,8 @@ use rusqlite::{Connection, params};
 pub use detail::{NodeContact, SendTarget};
 pub use guess::BUILTIN_NAMES;
 pub use ingest::{
-    Acknowledgement, Batch, DirectMessage, ObserverInfo, Outcome, Reception, SentMessage, SentTo,
-    StatusReport,
+    Acknowledgement, Batch, COMPANION_MAX_FRAME, DirectMessage, ObserverInfo, ObserverKind,
+    Outcome, Reception, SentMessage, SentTo, StatusReport,
 };
 pub use read::{Order, Page, Reader};
 

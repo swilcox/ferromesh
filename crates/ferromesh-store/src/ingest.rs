@@ -21,6 +21,41 @@ pub struct ObserverInfo {
     pub name: Option<String>,
     /// Region code from the topic, e.g. `BNA`.
     pub iata: Option<String>,
+    pub kind: ObserverKind,
+}
+
+/// How ferromesh hears from an observer, which decides what to expect of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ObserverKind {
+    /// It publishes what it hears to a broker.
+    #[default]
+    Mqtt,
+    /// Our own radio, on a serial port. Its firmware never hands over a
+    /// packet larger than [`COMPANION_MAX_FRAME`] bytes.
+    Companion,
+}
+
+/// The largest packet a companion radio reports hearing. Its firmware skips
+/// anything longer, counting it but never logging it, so a companion's
+/// delivery share can't reach 100% on a mesh that carries bigger packets.
+pub const COMPANION_MAX_FRAME: usize = 173;
+
+impl ObserverKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Mqtt => "mqtt",
+            Self::Companion => "companion",
+        }
+    }
+
+    /// Anything unrecognised, including an observer recorded before this
+    /// column existed, is taken to publish over MQTT.
+    pub fn parse(text: &str) -> Self {
+        match text {
+            "companion" => Self::Companion,
+            _ => Self::Mqtt,
+        }
+    }
 }
 
 /// One observer hearing one packet.
@@ -414,9 +449,10 @@ impl<'a> Batch<'a> {
         Ok(self
             .tx
             .prepare_cached(
-                "INSERT INTO observers (pubkey, name, iata, first_seen_at, last_seen_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)
+                "INSERT INTO observers (pubkey, name, iata, kind, first_seen_at, last_seen_at)
+                 VALUES (?1, ?2, ?3, ?5, ?4, ?4)
                  ON CONFLICT (pubkey) DO UPDATE SET
+                     kind = excluded.kind,
                      name = CASE WHEN excluded.last_seen_at >= observers.last_seen_at
                                  THEN coalesce(excluded.name, observers.name)
                                  ELSE observers.name END,
@@ -428,7 +464,13 @@ impl<'a> Batch<'a> {
                  RETURNING id",
             )?
             .query_row(
-                params![&observer.pubkey[..], observer.name, observer.iata, seen_at],
+                params![
+                    &observer.pubkey[..],
+                    observer.name,
+                    observer.iata,
+                    seen_at,
+                    observer.kind.as_str()
+                ],
                 |row| row.get(0),
             )?)
     }

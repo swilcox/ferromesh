@@ -4,7 +4,7 @@
 //! Numbers usually arrive as strings, so field parsing is lenient.
 
 use anyhow::{Context, Result, bail};
-use ferromesh_store::{Micros, ObserverInfo, Reception, StatusReport};
+use ferromesh_store::{Micros, ObserverInfo, ObserverKind, Reception, StatusReport};
 use jiff::Timestamp;
 use serde_json::{Map, Value};
 
@@ -25,6 +25,7 @@ pub fn parse(topic: &str, payload: &str) -> Result<Message> {
         pubkey: observer_key(pubkey)?,
         name: text(&fields, "origin"),
         iata: Some(iata.to_owned()),
+        kind: ObserverKind::Mqtt,
     };
     let at = timestamp(&fields)?;
 

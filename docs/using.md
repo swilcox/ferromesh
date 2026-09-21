@@ -98,7 +98,7 @@ Every observer — your repeater over MQTT, and your companion radio — reports
 
 It also checks delivery: the packets an observer counted receiving, against the receptions actually stored from it. Anything lost between the radio and the database shows up as less than 100%.
 
-Warnings flag an overdue report, a restart, a low battery, a noise floor well above that observer's usual level, and delivery below 99%.
+Warnings flag an overdue report, a restart, a low battery, a noise floor well above that observer's usual level, and a delivery shortfall — below 99% for an observer publishing over MQTT, or below 95% for a companion radio, which can never report packets over 173 bytes (see [companion.md](companion.md#limits-worth-knowing)).
 
 ## Channels
 

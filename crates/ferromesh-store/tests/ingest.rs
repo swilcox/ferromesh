@@ -3,7 +3,9 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use ferromesh_store::{ChannelKind, ObserverInfo, Outcome, Reception, StatusReport, Store};
+use ferromesh_store::{
+    ChannelKind, ObserverInfo, ObserverKind, Outcome, Reception, StatusReport, Store,
+};
 use meshcore_proto::ChannelKey;
 use serde::Deserialize;
 
@@ -74,7 +76,12 @@ fn fixture() -> Option<Fixture> {
 }
 
 fn tanyard() -> ObserverInfo {
-    ObserverInfo { pubkey: [7; 32], name: Some("Tanyard".into()), iata: Some("BNA".into()) }
+    ObserverInfo {
+        pubkey: [7; 32],
+        name: Some("Tanyard".into()),
+        iata: Some("BNA".into()),
+        kind: ObserverKind::Mqtt,
+    }
 }
 
 fn store_with(channels: impl IntoIterator<Item = impl AsRef<str>>) -> Store {

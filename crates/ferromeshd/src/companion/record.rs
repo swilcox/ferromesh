@@ -12,7 +12,7 @@
 
 use anyhow::{Context, Result, bail};
 use ferromesh_store::{
-    Acknowledgement, DirectMessage, ObserverInfo, Reception, SentMessage, SentTo,
+    Acknowledgement, DirectMessage, ObserverInfo, ObserverKind, Reception, SentMessage, SentTo,
 };
 use jiff::Timestamp;
 use meshcore_proto::companion::{Contact, Frame, Sent, Stats, code};
@@ -167,8 +167,12 @@ pub fn parse(record: &RawRecord) -> Result<Message> {
     };
     let fields: Map<String, Value> =
         serde_json::from_str(&record.payload).context("payload is not a JSON object")?;
-    let observer =
-        ObserverInfo { pubkey: observer_key(pubkey)?, name: text(&fields, "origin"), iata: None };
+    let observer = ObserverInfo {
+        pubkey: observer_key(pubkey)?,
+        name: text(&fields, "origin"),
+        iata: None,
+        kind: ObserverKind::Companion,
+    };
     let at = record.received_at.as_microsecond();
 
     if kind == "status" {

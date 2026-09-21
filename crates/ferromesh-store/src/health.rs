@@ -7,7 +7,7 @@ use ferromesh_model::{HealthHour, ObserverHealth, ObserverState};
 use jiff::Timestamp;
 use rusqlite::{Connection, Row, params};
 
-use crate::{Micros, Result};
+use crate::{COMPANION_MAX_FRAME, Micros, ObserverKind, Result};
 
 const SECOND: Micros = 1_000_000;
 const HOUR: Micros = 3600 * SECOND;
@@ -19,7 +19,12 @@ const LOW_BATTERY_MV: i64 = 3600;
 const NOISE_JUMP_DB: i64 = 10;
 /// The delivery check needs enough packets to mean anything.
 const MIN_COUNTED: i64 = 100;
+/// An observer publishing what it hears should lose nothing at all.
 const DELIVERY_WARNING_BELOW: f64 = 0.99;
+/// A companion radio never reports a packet over [`COMPANION_MAX_FRAME`]
+/// bytes, and how much of the traffic that is depends on the mesh, so only a
+/// wider shortfall than that is worth raising.
+const COMPANION_DELIVERY_WARNING_BELOW: f64 = 0.95;
 
 #[derive(Debug, Clone)]
 struct Report {
@@ -75,25 +80,43 @@ pub(crate) fn observer_health(
     now: Micros,
     hours: u32,
 ) -> Result<Vec<ObserverHealth>> {
-    let observers: Vec<(i64, Vec<u8>, Option<String>)> = conn
+    struct Observer {
+        id: i64,
+        pubkey: Vec<u8>,
+        name: Option<String>,
+        kind: ObserverKind,
+    }
+    let observers: Vec<Observer> = conn
         .prepare_cached(
-            "SELECT o.id, o.pubkey, o.name FROM observers o
+            "SELECT o.id, o.pubkey, o.name, o.kind FROM observers o
              WHERE EXISTS (SELECT 1 FROM observer_status s WHERE s.observer_id = o.id)
              ORDER BY o.name, o.pubkey",
         )?
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .query_map([], |row| {
+            Ok(Observer {
+                id: row.get(0)?,
+                pubkey: row.get(1)?,
+                name: row.get(2)?,
+                kind: row
+                    .get::<_, Option<String>>(3)?
+                    .as_deref()
+                    .map_or(ObserverKind::Mqtt, ObserverKind::parse),
+            })
+        })?
         .collect::<rusqlite::Result<_>>()?;
     observers
         .into_iter()
-        .map(|(id, pubkey, name)| health(conn, id, &pubkey, name, now, hours))
+        .map(|o| health(conn, o.id, &o.pubkey, o.name, o.kind, now, hours))
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn health(
     conn: &Connection,
     observer_id: i64,
     pubkey: &[u8],
     name: Option<String>,
+    kind: ObserverKind,
     now: Micros,
     hours: u32,
 ) -> Result<ObserverHealth> {
@@ -222,6 +245,7 @@ fn health(
     let mut health = ObserverHealth {
         pubkey: hex::encode(pubkey),
         name,
+        kind: kind.as_str().to_owned(),
         model: latest.model.clone(),
         firmware: latest.firmware.clone(),
         radio: latest.radio.clone(),
@@ -293,11 +317,22 @@ fn warnings(health: &ObserverHealth, age: Micros, hours: u32) -> Vec<String> {
             now - usual
         ));
     }
+    let companion = health.kind == ObserverKind::Companion.as_str();
+    let threshold =
+        if companion { COMPANION_DELIVERY_WARNING_BELOW } else { DELIVERY_WARNING_BELOW };
     if let Some(delivered) = health.delivered_share.filter(|_| health.counted >= MIN_COUNTED)
-        && delivered < DELIVERY_WARNING_BELOW
+        && delivered < threshold
     {
+        let because = if companion {
+            format!(
+                "; a companion radio never reports a packet over {COMPANION_MAX_FRAME} bytes, \
+                 so some shortfall is normal"
+            )
+        } else {
+            String::new()
+        };
         warnings.push(format!(
-            "only {:.1}% of the {} packets it counted reached ferromesh",
+            "only {:.1}% of the {} packets it counted reached ferromesh{because}",
             delivered * 100.0,
             health.counted
         ));

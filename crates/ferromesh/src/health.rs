@@ -29,7 +29,8 @@ pub fn title(health: &ObserverHealth) -> String {
     }
 }
 
-/// `online · Heltec V4 OLED · v1.17.1 · up 6 d 22 h · reported 2 min ago`.
+/// `online · companion · Heltec V4 OLED · v1.17.1 · up 6 d 22 h · reported
+/// 2 min ago`. Only a companion is named: it's the radio this server owns.
 pub fn status(health: &ObserverHealth, now: Timestamp) -> String {
     let state = match health.state {
         ObserverState::Online => "online",
@@ -37,6 +38,9 @@ pub fn status(health: &ObserverHealth, now: Timestamp) -> String {
         ObserverState::Offline => "offline",
     };
     let mut parts = vec![state.to_owned()];
+    if health.kind == "companion" {
+        parts.push("companion".to_owned());
+    }
     parts.extend(health.model.clone());
     parts.extend(health.firmware.clone());
     if let Some(up) = health.uptime_secs.filter(|_| health.state == ObserverState::Online) {
@@ -260,6 +264,7 @@ mod tests {
         let health = ObserverHealth {
             pubkey: "4d172767d319c09d".into(),
             name: Some("Tanyard".into()),
+            kind: "mqtt".into(),
             model: Some("Heltec V4 OLED".into()),
             firmware: Some("v1.17.1".into()),
             radio: None,

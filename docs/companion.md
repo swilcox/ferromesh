@@ -54,7 +54,7 @@ ferromesh contacts unpin Tanyard
 
 - **One client only.** Don't pair a phone with the radio while ferromeshd is using it.
 - **It hears what its antenna hears.** A repeater on a hill covers a region; a radio on a shelf behind a server covers a neighbourhood. A USB extension away from the machine can be worth several dB — computers are noisy at 900 MHz. Our first spot measured a −74 dBm noise floor against a hilltop repeater's −103 dBm.
-- **The largest frames don't make it.** The firmware's receive log drops some big packets, so a companion stores around 99.4% of what it counts hearing, against 100.0% from an observer repeater. `ferromesh health` shows the difference.
+- **Packets over 173 bytes are never reported.** The firmware only writes a receive-log line when the packet fits its serial frame (`len + 3 <= MAX_FRAME_SIZE`, with `MAX_FRAME_SIZE` 176), and drops it silently otherwise, having already counted it. Measured over a full day here: the largest packet the radio ever handed over was exactly 173 bytes, while the repeater on the same air stored packets up to 241, and the 2.2% of traffic above the limit accounts for the whole difference between what the radio counted and what reached the database. So a companion's delivery share can't reach 100%, and how far short depends on what the mesh is carrying. `ferromesh health` allows for this: it warns for a companion only below 95%, against 99% for an observer that publishes over MQTT.
 - **Channel messages are decoded twice.** The radio decrypts channels in its own slots, but ferromesh ignores those copies and decodes the raw receptions with the server's own channel keys instead — so the server's channel list, not the radio's slots, decides what you can read.
 
 ## Troubleshooting

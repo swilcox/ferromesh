@@ -32,6 +32,11 @@ pub struct ObserverHealth {
     /// Lowercase hex.
     pub pubkey: String,
     pub name: Option<String>,
+    /// How ferromesh hears from it: `mqtt` for one publishing to a broker,
+    /// `companion` for a radio on our own USB port. A companion can't report
+    /// packets over 173 bytes, so less is expected of its delivery share.
+    #[serde(default)]
+    pub kind: String,
     pub model: Option<String>,
     pub firmware: Option<String>,
     /// `MHz,kHz,SF,CR`.

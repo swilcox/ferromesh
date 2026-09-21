@@ -2,17 +2,29 @@
 //! what observers hear and what recipients acknowledge.
 
 use ferromesh_model::SendStatus;
-use ferromesh_store::{Acknowledgement, ObserverInfo, Reception, SentMessage, SentTo, Store};
+use ferromesh_store::{
+    Acknowledgement, ObserverInfo, ObserverKind, Reception, SentMessage, SentTo, Store,
+};
 use meshcore_proto::{ChannelKey, GroupText, Packet};
 
 const T0: i64 = 1_789_000_000_000_000;
 
 fn radio() -> ObserverInfo {
-    ObserverInfo { pubkey: [7; 32], name: Some("desk".into()), iata: None }
+    ObserverInfo {
+        pubkey: [7; 32],
+        name: Some("desk".into()),
+        iata: None,
+        kind: ObserverKind::Companion,
+    }
 }
 
 fn tanyard() -> ObserverInfo {
-    ObserverInfo { pubkey: [1; 32], name: Some("Tanyard".into()), iata: Some("BNA".into()) }
+    ObserverInfo {
+        pubkey: [1; 32],
+        name: Some("Tanyard".into()),
+        iata: Some("BNA".into()),
+        kind: ObserverKind::Mqtt,
+    }
 }
 
 fn sent(to: SentTo, body: &str, sender_timestamp: u32) -> SentMessage {

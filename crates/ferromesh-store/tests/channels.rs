@@ -3,7 +3,7 @@
 //! channel had been there from the start.
 
 use ferromesh_model::{Backfill, Filter, GuessChannels, Kind};
-use ferromesh_store::{ChannelKind, ObserverInfo, Order, Page, Reception, Store};
+use ferromesh_store::{ChannelKind, ObserverInfo, ObserverKind, Order, Page, Reception, Store};
 use meshcore_proto::{ChannelKey, GroupText};
 
 const HIDDEN: &str = "#hidden-valley";
@@ -18,8 +18,12 @@ fn frame(channel: &str, sent: u32, text: &str) -> Vec<u8> {
 }
 
 fn receptions(messages: &[(&str, &str)]) -> Vec<Reception> {
-    let observer =
-        ObserverInfo { pubkey: [7; 32], name: Some("Tanyard".into()), iata: Some("BNA".into()) };
+    let observer = ObserverInfo {
+        pubkey: [7; 32],
+        name: Some("Tanyard".into()),
+        iata: Some("BNA".into()),
+        kind: ObserverKind::Mqtt,
+    };
     messages
         .iter()
         .enumerate()

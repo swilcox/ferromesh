@@ -4,7 +4,7 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use ferromesh_model::{Event, Filter, Kind};
-use ferromesh_store::{ChannelKind, ObserverInfo, Order, Page, Reception, Store};
+use ferromesh_store::{ChannelKind, ObserverInfo, ObserverKind, Order, Page, Reception, Store};
 use meshcore_proto::{ChannelKey, GroupText};
 
 const EVERYTHING: Page = Page {
@@ -45,7 +45,12 @@ const FILTERS: &[(Kind, &str)] = &[
 ];
 
 fn observer(seed: u8, name: Option<&str>) -> ObserverInfo {
-    ObserverInfo { pubkey: [seed; 32], name: name.map(Into::into), iata: Some("BNA".into()) }
+    ObserverInfo {
+        pubkey: [seed; 32],
+        name: name.map(Into::into),
+        iata: Some("BNA".into()),
+        kind: ObserverKind::Mqtt,
+    }
 }
 
 /// A flood GRP_TXT frame with one-byte hop hashes.
