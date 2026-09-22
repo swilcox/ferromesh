@@ -958,13 +958,13 @@ mod tests {
             // own channel, whatever the sidebar has selected.
             press(&mut app, KeyCode::Char('r'));
             let lines = render(&app, 100, 8).join("\n");
-            assert!(lines.contains("message #wx: @[Bob]: "), "{lines}");
+            assert!(lines.contains("message #wx: @[Bob] "), "{lines}");
             for key in "hi".chars() {
                 press(&mut app, KeyCode::Char(key));
             }
             assert_eq!(
                 enter(&mut app),
-                [Command::Send { to: "#wx".into(), text: "@[Bob]: hi".into() }]
+                [Command::Send { to: "#wx".into(), text: "@[Bob] hi".into() }]
             );
 
             // A received mention is shown as @Bob, without the brackets.
@@ -974,14 +974,14 @@ mod tests {
                 first_seen_at: app.now,
                 channel: "#wx".into(),
                 sender: Some("Ann".into()),
-                body: "@[Bob]: yes".into(),
+                body: "@[Bob] yes".into(),
                 sender_timestamp: 0,
                 txt_type: 0,
                 attempt: 0,
                 heard: 1,
             })));
             let lines = render(&app, 100, 8).join("\n");
-            assert!(lines.contains("Ann: @Bob: yes"), "{lines}");
+            assert!(lines.contains("Ann: @Bob yes"), "{lines}");
             assert!(!lines.contains("@[Bob]"), "brackets are wire-only: {lines}");
 
             // m writes to the sender of the selected message instead.

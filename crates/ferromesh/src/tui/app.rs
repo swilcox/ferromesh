@@ -666,7 +666,7 @@ impl App {
             return;
         };
         self.compose_to = Some(channel);
-        let prefix = sender.map(|sender| format!("{}: ", mention::wrap(&sender)));
+        let prefix = sender.map(|sender| format!("{} ", mention::wrap(&sender)));
         self.input =
             Some(Input { prompt: Prompt::Compose, text: prefix.unwrap_or_default(), error: None });
     }

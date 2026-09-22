@@ -13,9 +13,11 @@
 //! and calls it "MeshCore's mention form", meshcadet documents the same
 //! wire convention, and MeshCoreOne matches `@\[([^\]]+)\]`.
 
-/// `@[name]`, as it travels. A name containing `]` can't be delimited, so
-/// it's left as plain text rather than written as a mention nobody can
-/// parse.
+/// `@[name]`, as it travels. Nothing follows it: some clients prefill a
+/// reply with a trailing `:`, but most mentions in the wild carry none, so
+/// callers add their own separator. A name containing `]` can't be
+/// delimited, so it's left as plain text rather than written as a mention
+/// nobody can parse.
 pub fn wrap(name: &str) -> String {
     if name.contains(']') || name.is_empty() {
         return name.to_owned();
