@@ -11,6 +11,8 @@ use ferromesh_model::{
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
+use meshcore_proto::mention;
+
 use crate::config::WatchConfig;
 
 /// Events kept per feed; live events push the oldest out beyond this.
@@ -184,6 +186,8 @@ pub enum Prompt {
     Compose,
     /// Advertising the radio: `l` for neighbours, `f` for the whole mesh.
     Advert,
+    /// Who to start a conversation with: a name or a key prefix.
+    Recipient,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -245,6 +249,8 @@ pub enum Update {
     SentDms(Vec<SentMessageInfo>),
     /// The radio's contacts, or why they couldn't be fetched.
     Contacts(Result<Vec<RadioContact>, String>),
+    /// A direct message went to this node, named as the server resolved it.
+    Wrote(String),
     Detail(String, Result<PacketDetail, String>),
     Older {
         kind: Kind,
@@ -280,6 +286,10 @@ pub struct App {
     pub correspondent: Option<String>,
     /// Lines the conversation is scrolled back from its newest message.
     pub dm_scroll: usize,
+    /// Where the open compose line is addressed, when it isn't simply the
+    /// selected channel or conversation: replying goes to the message's own
+    /// channel, whatever the sidebar shows.
+    compose_to: Option<String>,
     /// The radio's contacts, or why they couldn't be fetched.
     pub contacts: Result<Vec<RadioContact>, String>,
     pub contact_selected: usize,
@@ -330,6 +340,7 @@ impl App {
             sent_dms: Vec::new(),
             correspondent: None,
             dm_scroll: 0,
+            compose_to: None,
             contacts: Ok(Vec::new()),
             contact_selected: 0,
             hop_names: HashMap::new(),
@@ -530,6 +541,13 @@ impl App {
             })
             .collect();
         conversations.sort_by(|a, b| b.last_at().cmp(&a.last_at()).then_with(|| a.who.cmp(&b.who)));
+        // Someone you've picked but not yet written to has a conversation of
+        // their own, waiting at the top.
+        if let Some(who) = &self.correspondent
+            && !conversations.iter().any(|thread| &thread.who == who)
+        {
+            conversations.insert(0, Conversation { who: who.clone(), messages: Vec::new() });
+        }
         conversations
     }
 
@@ -549,8 +567,10 @@ impl App {
     /// Who `c` writes to: the selected conversation in the DM view, or the
     /// selected channel in the messages view.
     pub fn compose_target(&self) -> Option<String> {
+        if let Some(to) = &self.compose_to {
+            return Some(to.clone());
+        }
         match self.view {
-            View::Contacts => self.selected_contact().map(|contact| contact.name.clone()),
             View::Dms => {
                 let conversations = self.conversations();
                 self.selected_conversation(&conversations).map(|(_, thread)| thread.who.clone())
@@ -628,6 +648,62 @@ impl App {
         vec![Command::Pin { to, pinned }]
     }
 
+    /// The channel message the messages view has selected.
+    fn selected_message(&self) -> Option<(String, Option<String>)> {
+        let visible = self.visible(View::Messages);
+        let index = self.selected(View::Messages, &visible)?;
+        match visible[index] {
+            Event::Message(message) => Some((message.channel.clone(), message.sender.clone())),
+            _ => None,
+        }
+    }
+
+    /// Answers the selected message on the channel it arrived on, naming its
+    /// sender the way other MeshCore clients do.
+    fn reply_to_selected(&mut self) {
+        let Some((channel, sender)) = self.selected_message() else {
+            self.status = Some("no message selected to reply to".into());
+            return;
+        };
+        self.compose_to = Some(channel);
+        let prefix = sender.map(|sender| format!("{}: ", mention::wrap(&sender)));
+        self.input =
+            Some(Input { prompt: Prompt::Compose, text: prefix.unwrap_or_default(), error: None });
+    }
+
+    /// Opens a conversation with whatever is selected in the nodes or
+    /// contacts view, ready to write.
+    fn write_to_selected(&mut self) {
+        let who = match self.view {
+            View::Messages => match self.selected_message() {
+                Some((_, Some(sender))) => Some(sender),
+                _ => {
+                    self.status = Some("that message doesn't name its sender".into());
+                    return;
+                }
+            },
+            View::Contacts => self.selected_contact().map(|contact| contact.name.clone()),
+            View::Nodes => self
+                .visible_nodes()
+                .get(self.node_selected)
+                .map(|node| node.name.clone().unwrap_or_else(|| node.pubkey[..12].to_owned())),
+            _ => None,
+        };
+        let Some(who) = who else {
+            return;
+        };
+        self.write_to(who);
+    }
+
+    /// Shows the conversation with `who`, whether or not there is one yet,
+    /// and opens the compose line.
+    fn write_to(&mut self, who: String) {
+        self.correspondent = Some(who);
+        self.dm_scroll = 0;
+        self.show(View::Dms);
+        self.prompt(Prompt::Compose);
+    }
+
     pub fn apply(&mut self, update: Update) {
         match update {
             Update::Event(event) => self.receive(event, true),
@@ -655,6 +731,7 @@ impl App {
             Update::Dms(dms) => self.dms = dms,
             Update::SentDms(sent) => self.sent_dms = sent,
             Update::Contacts(contacts) => self.contacts = contacts,
+            Update::Wrote(who) => self.correspondent = Some(who),
             Update::Nodes(nodes) => {
                 self.hop_names.clear();
                 for node in &nodes {
@@ -850,6 +927,13 @@ impl App {
             KeyCode::Char('p') if matches!(self.view, View::Contacts | View::Nodes) => {
                 return self.pin_selected();
             }
+            KeyCode::Char('n') if self.view == View::Dms => self.prompt(Prompt::Recipient),
+            KeyCode::Char('r') if self.view == View::Messages => self.reply_to_selected(),
+            KeyCode::Char('m')
+                if matches!(self.view, View::Nodes | View::Contacts | View::Messages) =>
+            {
+                self.write_to_selected();
+            }
             _ => {}
         }
         Vec::new()
@@ -1021,6 +1105,10 @@ impl App {
             self.status = Some("there's nothing to filter here".into());
             return;
         }
+        if prompt == Prompt::Recipient {
+            self.input = Some(Input { prompt, text: String::new(), error: None });
+            return;
+        }
         if prompt == Prompt::Advert {
             self.input = Some(Input { prompt, text: String::new(), error: None });
             return;
@@ -1055,7 +1143,10 @@ impl App {
             return Vec::new();
         };
         match key.code {
-            KeyCode::Esc => self.input = None,
+            KeyCode::Esc => {
+                self.input = None;
+                self.compose_to = None;
+            }
             KeyCode::Enter => return self.submit(),
             KeyCode::Backspace => {
                 input.text.pop();
@@ -1095,13 +1186,20 @@ impl App {
         let Some(input) = self.input.take() else {
             return Vec::new();
         };
+        let composed_to = self.compose_to.take();
         let text = input.text.trim().to_owned();
         let kind = self.view.kind();
         match input.prompt {
             // Answered by a single key in advert_key, never submitted.
             Prompt::Advert => Vec::new(),
+            Prompt::Recipient => {
+                if !text.is_empty() {
+                    self.write_to(text);
+                }
+                Vec::new()
+            }
             Prompt::Compose => {
-                let Some(to) = self.compose_target() else {
+                let Some(to) = composed_to.or_else(|| self.compose_target()) else {
                     return Vec::new();
                 };
                 if text.is_empty() {

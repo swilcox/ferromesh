@@ -4,6 +4,7 @@ use std::ops::Range;
 
 use ferromesh_model::{Event, Kind, SendStatus};
 use jiff::Timestamp;
+use meshcore_proto::mention;
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -144,7 +145,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         let label = match input.prompt {
             Prompt::Filter => format!("filter {}: ", app.view.title().to_lowercase()),
             Prompt::Watch => "watch: ".to_owned(),
-            Prompt::Compose => format!("message {}: ", app.channel.as_deref().unwrap_or_default()),
+            Prompt::Compose => format!("message {}: ", app.compose_target().unwrap_or_default()),
+            Prompt::Recipient => "write to (a name, or the start of a key): ".to_owned(),
             Prompt::Advert => {
                 "advertise the radio:  l  to the neighbours   f  across the mesh   Esc  cancel"
                     .to_owned()
@@ -181,15 +183,15 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (None, None) => {
             let hints = match app.view {
                 View::Messages => {
-                    "Tab channels  c compose  / filter  w watch  Enter inspect  ? help"
+                    "Tab channels  c compose  r reply  m write  / filter  Enter inspect  ? help"
                 }
                 View::Packets | View::Rf => {
                     "/ filter  w watch  Enter inspect  g/G top/end  ? help  q quit"
                 }
                 View::Dms => "Tab people  c reply  j/k scroll  ? help  q quit",
-                View::Nodes => "/ search  p keep as a contact  ? help  q quit",
+                View::Nodes => "/ search  m write  p keep as a contact  ? help  q quit",
                 View::Contacts => {
-                    "p keep or release  c write  / search  a advertise  ? help  q quit"
+                    "p keep or release  m write  / search  a advertise  ? help  q quit"
                 }
                 View::Health => {
                     "from each observer's status reports; refreshed every minute  ? help"
@@ -267,12 +269,29 @@ fn message_lines(
         content.push(Span::styled(sender.clone(), Style::new().bold().fg(name_color(sender))));
         content.push(Span::raw(": "));
     }
-    content.push(Span::raw(message.body.clone()));
+    content.extend(body_spans(&message.body));
     let heard = app.heard(event);
     if heard > 1 {
         content.push(Span::raw(format!("  ×{heard}")).dim());
     }
     wrap(prefix, content, width)
+}
+
+/// A message body, with `@[name]` mentions shown as `@name` and picked out,
+/// the way other MeshCore clients render them.
+pub(super) fn body_spans(body: &str) -> Vec<Span<'static>> {
+    let runs = mention::runs(body);
+    if runs.iter().all(|run| matches!(run, mention::Run::Text(_))) {
+        return vec![Span::raw(body.to_owned())];
+    }
+    runs.into_iter()
+        .map(|run| match run {
+            mention::Run::Text(text) => Span::raw(text.to_owned()),
+            mention::Run::Mention(name) => {
+                Span::styled(format!("@{name}"), Style::new().bold().fg(name_color(name)))
+            }
+        })
+        .collect()
 }
 
 fn draw_channels(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
@@ -335,6 +354,16 @@ fn draw_dms(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
         return;
     };
 
+    if conversation.messages.is_empty() {
+        let note = format!(
+            "nothing exchanged with {} yet\n\nc writes the first message. It reaches them only \
+             if their radio holds yours as a contact, which it gets from hearing you advertise \
+             (a).",
+            conversation.who
+        );
+        frame.render_widget(Paragraph::new(note).dim().wrap(Wrap { trim: false }), inner);
+        return;
+    }
     let width = usize::from(inner.width);
     let mut lines = Vec::new();
     let mut previous = None;
@@ -369,7 +398,7 @@ fn dm_lines(
             Style::new().bold().fg(name_color(who))
         },
     )];
-    content.push(Span::raw(message.body.clone()));
+    content.extend(body_spans(&message.body));
     if let Some(note) = delivery(message) {
         content.push(Span::raw(format!("  {note}")).dim());
     }
@@ -421,7 +450,12 @@ fn draw_correspondents(
     let items: Vec<ListItem> = conversations[rows.clone()]
         .iter()
         .map(|thread| {
-            let when = ago(app, thread.last_at());
+            // Someone picked but not yet written to has no time to show.
+            let when = if thread.messages.is_empty() {
+                "new".to_owned()
+            } else {
+                ago(app, thread.last_at())
+            };
             let label = truncate(&thread.who, width.saturating_sub(when.len() + 2));
             let pad = width.saturating_sub(Span::raw(label.as_str()).width() + when.len() + 2);
             ListItem::new(Line::from(vec![
@@ -643,8 +677,8 @@ mod tests {
     mod screens {
         use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
         use ferromesh_model::{
-            ChannelInfo, DecodeState, DirectMessageInfo, MessageEvent, PacketDetail, PacketEvent,
-            PacketReception, RadioContact, SentMessageInfo,
+            ChannelInfo, DecodeState, DirectMessageInfo, MessageEvent, NodeInfo, PacketDetail,
+            PacketEvent, PacketReception, RadioContact, SentMessageInfo,
         };
         use jiff::tz::TimeZone;
         use meshcore_proto::{ChannelKey, GroupText};
@@ -866,6 +900,96 @@ mod tests {
                 app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE))),
                 [Command::Pin { to: "Recent".into(), pinned: true }]
             );
+        }
+
+        #[test]
+        fn writing_to_someone_new() {
+            let mut app = app();
+            let type_in = |app: &mut App, text: &str| {
+                for key in text.chars() {
+                    press(app, KeyCode::Char(key));
+                }
+            };
+            let enter = |app: &mut App| {
+                app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)))
+            };
+
+            // n in the DM view asks who, then opens the compose line.
+            press(&mut app, KeyCode::Char('2'));
+            press(&mut app, KeyCode::Char('n'));
+            type_in(&mut app, "KQ8B");
+            assert!(enter(&mut app).is_empty(), "naming someone sends nothing by itself");
+            let lines = render(&app, 100, 12).join("\n");
+            assert!(lines.contains("nothing exchanged with KQ8B yet"), "{lines}");
+
+            type_in(&mut app, "hi");
+            assert_eq!(enter(&mut app), [Command::Send { to: "KQ8B".into(), text: "hi".into() }]);
+
+            // The thread follows the name the server resolved.
+            app.apply(Update::Wrote("KQ8B Bob".into()));
+            let lines = render(&app, 100, 12).join("\n");
+            assert!(lines.contains("nothing exchanged with KQ8B Bob yet"), "{lines}");
+
+            // m writes to whoever is selected in the nodes view.
+            app.apply(Update::Nodes(vec![NodeInfo {
+                pubkey: "ab".repeat(16),
+                name: Some("Alice".into()),
+                role: Some("chat".into()),
+                first_seen_at: app.now,
+                last_seen_at: app.now,
+                adverts: 1,
+                lat: None,
+                lon: None,
+            }]));
+            press(&mut app, KeyCode::Char('5'));
+            press(&mut app, KeyCode::Char('m'));
+            type_in(&mut app, "yo");
+            assert_eq!(enter(&mut app), [Command::Send { to: "Alice".into(), text: "yo".into() }]);
+        }
+
+        #[test]
+        fn replying_to_a_channel_message() {
+            let mut app = app();
+            let enter = |app: &mut App| {
+                app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)))
+            };
+
+            // r prefills the sender's mention and answers on the message's
+            // own channel, whatever the sidebar has selected.
+            press(&mut app, KeyCode::Char('r'));
+            let lines = render(&app, 100, 8).join("\n");
+            assert!(lines.contains("message #wx: @[Bob]: "), "{lines}");
+            for key in "hi".chars() {
+                press(&mut app, KeyCode::Char(key));
+            }
+            assert_eq!(
+                enter(&mut app),
+                [Command::Send { to: "#wx".into(), text: "@[Bob]: hi".into() }]
+            );
+
+            // A received mention is shown as @Bob, without the brackets.
+            app.apply(Update::Event(Event::Message(MessageEvent {
+                id: 2,
+                packet_hash: "11".repeat(8),
+                first_seen_at: app.now,
+                channel: "#wx".into(),
+                sender: Some("Ann".into()),
+                body: "@[Bob]: yes".into(),
+                sender_timestamp: 0,
+                txt_type: 0,
+                attempt: 0,
+                heard: 1,
+            })));
+            let lines = render(&app, 100, 8).join("\n");
+            assert!(lines.contains("Ann: @Bob: yes"), "{lines}");
+            assert!(!lines.contains("@[Bob]"), "brackets are wire-only: {lines}");
+
+            // m writes to the sender of the selected message instead.
+            press(&mut app, KeyCode::Char('m'));
+            for key in "yo".chars() {
+                press(&mut app, KeyCode::Char(key));
+            }
+            assert_eq!(enter(&mut app), [Command::Send { to: "Ann".into(), text: "yo".into() }]);
         }
 
         /// Every view and overlay draws, even on the smallest screen.

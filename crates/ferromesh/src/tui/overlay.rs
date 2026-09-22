@@ -189,6 +189,8 @@ const HELP: &[(&str, &str)] = &[
     ("c", "compose: to a channel, a reply in DMs, or a contact"),
     ("a", "advertise the radio (l neighbours, f mesh)"),
     ("p", "keep a contact, or a node, on the radio"),
+    ("n m", "write to someone: by name (DMs), or selected"),
+    ("r", "reply on the channel, naming the sender"),
     ("d", "delete the selected watch"),
     ("c", "clear alerts"),
     ("b", "bell on or off"),

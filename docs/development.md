@@ -61,4 +61,8 @@ A few protocol facts that shape the code:
 - meshcore-rs (a Rust companion client): https://docs.rs/crate/meshcore-rs/latest
 - meshcore-proxy (USB/BLE companion to TCP): https://github.com/rgregg/meshcore-proxy
 - CoreScope (prior art): https://github.com/Kpa-clawbot/CoreScope
+- The `@[Name]` mention convention, which MeshCore doesn't document, as other clients implement it:
+  [MeshMonitor](https://github.com/Yeraze/meshmonitor/blob/main/src/components/MeshCore/MeshCoreMessageStream.tsx),
+  [meshcadet](https://github.com/jagoda/meshcadet/blob/main/protocol/src/mention.rs),
+  [MeshCoreOne](https://github.com/Avi0n/MeshCoreOne/blob/main/MC1Services/Sources/MC1Services/Utilities/MentionUtilities.swift)
 - MeshCore flasher: https://flasher.meshcore.io/

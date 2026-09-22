@@ -86,6 +86,12 @@ whole mesh airtime. Use it when you want to be reachable from far away, and the
 plain one otherwise. Two floods in a row are almost always a mistake, so the
 server refuses a second within a minute of the first.
 
+### Naming someone in a message
+
+MeshCore carries a mention as plain text in the message body: `@[their name]`, brackets included, which is how a name with a space in it stays in one piece. Other clients highlight it and strip the brackets when they display it, and so does ferromesh — you'll see `@Bob` in the feed, and `@[Bob]` only if you look at the raw packet.
+
+`r` writes the brackets for you. There's no protocol field behind any of this: it's a convention other clients settled on rather than something MeshCore documents, so it's worth keeping to the exact form if you type one by hand.
+
 ## Health
 
 ```sh
@@ -128,7 +134,7 @@ Eight views, switched with `1` to `8`:
 | | |
 |---|---|
 | **1 Messages** | A channel list with unread counts, and each message once with how many times it was heard |
-| **2 DMs** | Direct messages, as a conversation per person: what they sent, what you sent, and whether it was acknowledged |
+| **2 DMs** | Direct messages, as a conversation per person: what they sent, what you sent, and whether it was acknowledged. `n` starts one with anyone |
 | **3 Packets** | Every distinct packet, decoded where possible |
 | **4 RF** | Every reception, with signal strength and path, naming repeaters where a hop prefix identifies one |
 | **5 Nodes** | Every node that has advertised |
@@ -141,6 +147,8 @@ Keys:
 - `c` composes: a message to the selected channel, a reply in the conversation the DM view is showing, or a message to the selected contact (needs the token).
 - `Tab` moves between the channel list and the feed, or the people list and the conversation in DMs.
 - `p` keeps a contact on the radio, or lets it go again; in the Nodes view it adds the selected node as a kept contact (needs the token).
+- `n` in the DM view starts a conversation with anyone, by name or the start of their key; `m` in the Nodes, Contacts or Messages view does the same for whoever is selected — in Messages, that's the sender of the selected message.
+- `r` replies to the selected channel message, on the channel it arrived on and naming its sender.
 - `a` advertises the radio: `l` to its neighbours, `f` across the mesh (needs the token).
 - `a` advertises the radio, then `l` for its neighbours or `f` for the whole mesh (needs the token).
 - `Enter` opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field.

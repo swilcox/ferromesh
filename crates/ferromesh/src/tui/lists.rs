@@ -477,7 +477,7 @@ fn summary(event: &Event) -> Vec<Span<'static>> {
             if let Some(sender) = &message.sender {
                 spans.push(Span::raw(format!("{sender}: ")).bold());
             }
-            spans.push(Span::raw(message.body.clone()));
+            spans.extend(ui::body_spans(&message.body));
             spans
         }
         Event::Packet(packet) => {

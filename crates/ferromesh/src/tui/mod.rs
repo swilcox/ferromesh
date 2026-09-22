@@ -298,10 +298,17 @@ impl Network {
                     let request = SendRequest { to: to.clone(), text };
                     let result: Result<SentMessageInfo> =
                         server.post("/api/v1/send", &request, token.as_deref()).await;
-                    let status = match result {
-                        Ok(sent) => format!("sent to {to} as {}", sent.from),
+                    let status = match &result {
+                        Ok(sent) => format!("sent to {} as {}", sent.to, sent.from),
                         Err(error) => format!("couldn't send to {to}: {error:#}"),
                     };
+                    // Keep the DM view on the conversation just written in,
+                    // under the name the server resolved.
+                    if let Ok(sent) = &result
+                        && sent.direct
+                    {
+                        let _ = updates.send(Update::Wrote(sent.to.clone()));
+                    }
                     let _ = updates.send(Update::Status(status));
                     fetch_dms(&server, &updates).await;
                 });

@@ -32,6 +32,7 @@ pub mod advert;
 pub mod channel;
 pub mod companion;
 pub mod error;
+pub mod mention;
 pub mod packet;
 pub mod payload;
 
