@@ -95,3 +95,42 @@ fn senders_are_named_by_key_prefix() {
     assert_eq!((listed[1].sender.as_deref(), listed[1].hops), (Some("Hilltop"), Some(2)));
     assert_eq!(store.direct_messages(1).unwrap().len(), 1);
 }
+
+#[test]
+fn room_posts_name_their_author() {
+    let (room_key, room_advert) = advert(4, "PeakMesh Room");
+    let (author_key, author_advert) = advert(5, "Ann");
+    let mut store = Store::open_in_memory().unwrap();
+    for frame in [room_advert, author_advert] {
+        let reception = Reception {
+            observer: companion(),
+            rx_at: T0,
+            frame,
+            snr: None,
+            rssi: None,
+            score: None,
+            direction: None,
+        };
+        store.write(|batch| batch.record_reception(&reception)).unwrap();
+    }
+
+    // A room post comes from the room, signed by whoever wrote it.
+    let mut post = direct(T0 + 1, room_key[..6].try_into().unwrap(), "Ann: anyone about?", 1.0);
+    post.txt_type = 2;
+    post.signer_prefix = Some(author_key[..4].try_into().unwrap());
+    // One from an author nobody has heard advertise.
+    let mut stranger = direct(T0 + 2, room_key[..6].try_into().unwrap(), "hello all", 1.0);
+    stranger.txt_type = 2;
+    stranger.signer_prefix = Some([0xAB; 4]);
+    store.write(|batch| batch.record_direct_message(&post)).unwrap();
+    store.write(|batch| batch.record_direct_message(&stranger)).unwrap();
+
+    let listed = store.direct_messages(10).unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[1].sender.as_deref(), Some("PeakMesh Room"));
+    assert_eq!(listed[1].author.as_deref(), Some("Ann"));
+    assert_eq!(listed[1].author_prefix.as_deref(), Some(hex::encode(&author_key[..4]).as_str()));
+    // Unknown stays unnamed rather than guessed.
+    assert_eq!(listed[0].author, None);
+    assert_eq!(listed[0].author_prefix.as_deref(), Some("abababab"));
+}

@@ -15,12 +15,13 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use ferromesh_store::{NodeContact, Reader};
+use ferromesh_store::{NodeContact, Reader, SendTarget};
 use meshcore_proto::companion::Contact;
 use meshcore_proto::{Packet, Payload, PayloadType};
 use tracing::{info, warn};
 
 use super::session::Session;
+use crate::config::RoomConfig;
 
 /// How long a direct message may go unread before rescuing its sender. The
 /// radio hands over what it can read within a moment.
@@ -35,12 +36,27 @@ const SENDER_KINDS: [u8; 2] = [1, 3];
 pub trait Directory {
     /// Nodes whose key starts with `prefix`, most recently heard first.
     fn nodes_by_key_prefix(&self, prefix: &[u8]) -> Vec<NodeContact>;
+
+    /// The one node called `name`, or whose key starts with it. `None` when
+    /// nothing matches, or more than one does.
+    fn node_by_name(&self, name: &str) -> Option<NodeContact>;
 }
 
 /// The server's database.
 pub struct Database(pub PathBuf);
 
 impl Directory for Database {
+    fn node_by_name(&self, name: &str) -> Option<NodeContact> {
+        match Reader::open(&self.0).and_then(|reader| reader.send_target(name)) {
+            Ok(SendTarget::Node(node)) => Some(node),
+            Ok(_) => None,
+            Err(error) => {
+                warn!("couldn't look up {name}: {error}");
+                None
+            }
+        }
+    }
+
     fn nodes_by_key_prefix(&self, prefix: &[u8]) -> Vec<NodeContact> {
         Reader::open(&self.0).and_then(|reader| reader.nodes_by_key_prefix(prefix)).unwrap_or_else(
             |error| {
@@ -156,6 +172,46 @@ pub fn rescue<L: Read + Write>(
     Ok(())
 }
 
+/// Logs in to each configured room, so its posts arrive as messages. The
+/// room must have been heard advertising and must be a contact — joining is
+/// deliberate, and the radio only adds chat radios by itself.
+///
+/// The node answers over the air, so this only sends the requests; the
+/// answers arrive later as pushes.
+pub fn join_rooms<L: Read + Write>(
+    session: &mut Session<L>,
+    directory: &dyn Directory,
+    rooms: &[RoomConfig],
+) -> Result<()> {
+    for room in rooms {
+        let Some(node) = directory.node_by_name(&room.name) else {
+            warn!(
+                room = %room.name,
+                "can't join the room: no node of that name has been heard advertising"
+            );
+            continue;
+        };
+        let contact = contact_from(&node);
+        if let Err(refusal) = session.add_contact(&contact)? {
+            warn!(room = %room.name, "can't join the room: {refusal}");
+            continue;
+        }
+        // A room you're a member of is worth keeping through a full table.
+        if let Err(refusal) = session.set_favourite(&contact, true)? {
+            warn!(room = %room.name, "couldn't keep the room as a contact: {refusal}");
+        }
+        match session.send_login(&node.pubkey, &room.password)? {
+            Ok(sent) => info!(
+                room = %room.name,
+                within_ms = sent.timeout_ms,
+                "asked to join the room; waiting for its answer"
+            ),
+            Err(refusal) => warn!(room = %room.name, "couldn't ask to join the room: {refusal}"),
+        }
+    }
+    Ok(())
+}
+
 /// Makes the sender of a direct message a favourite, so the radio keeps it.
 pub fn pin_sender<L: Read + Write>(
     session: &mut Session<L>,
@@ -188,12 +244,20 @@ pub fn pin_sender<L: Read + Write>(
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use meshcore_proto::companion::{code, command};
+
     use super::super::session::tests::FakeRadio;
     use super::*;
 
     pub(crate) struct Nodes(pub Vec<NodeContact>);
 
     impl Directory for Nodes {
+        fn node_by_name(&self, name: &str) -> Option<NodeContact> {
+            let mut found =
+                self.0.iter().filter(|node| node.name.as_deref() == Some(name)).cloned();
+            found.next().filter(|_| found.next().is_none())
+        }
+
         fn nodes_by_key_prefix(&self, prefix: &[u8]) -> Vec<NodeContact> {
             self.0.iter().filter(|node| node.pubkey.starts_with(prefix)).cloned().collect()
         }
@@ -255,6 +319,42 @@ pub(crate) mod tests {
         let nodes = Nodes(vec![node(0xD2, 1, "KK4SW", 1), node(0xD2, 5, "Newcomer", 1)]);
         rescue(&mut session, &nodes, 0xD2).unwrap();
         assert_eq!(session.list_contacts().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn joining_a_room_adds_it_keeps_it_and_logs_in() {
+        let room = |name: &str| RoomConfig { name: name.into(), password: "hunter2".into() };
+        let nodes = Nodes(vec![node(0x40, 7, "PeakMesh Room", 3)]);
+        let mut session = Session::start(FakeRadio::default()).unwrap();
+        join_rooms(&mut session, &nodes, &[room("PeakMesh Room")]).unwrap();
+
+        let contacts = session.list_contacts().unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(
+            (contacts[0].name.as_str(), contacts[0].is_favourite()),
+            ("PeakMesh Room", true)
+        );
+        let login = session
+            .link()
+            .commands
+            .iter()
+            .find(|command| command[0] == command::SEND_LOGIN)
+            .expect("asked to log in");
+        assert_eq!(&login[1..33], &nodes.0[0].pubkey[..], "logs in to the room's own key");
+        assert_eq!(&login[33..], b"hunter2");
+
+        // The room's answer arrives later, as a push.
+        let success = [&[code::PUSH_LOGIN_SUCCESS, 1][..], &nodes.0[0].pubkey[..6]].concat();
+        session.link_mut().push(&success);
+        session.poll(Duration::from_millis(1)).unwrap();
+        let logins = session.take_logins();
+        assert_eq!(logins.len(), 1);
+        assert!(logins[0].accepted.is_some_and(|accepted| accepted.is_admin()));
+
+        // A room nobody has heard advertise can't be joined, and says so
+        // rather than failing.
+        join_rooms(&mut session, &Nodes(Vec::new()), &[room("Nowhere")]).unwrap();
+        assert_eq!(session.list_contacts().unwrap().len(), 1);
     }
 
     #[test]

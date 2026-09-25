@@ -30,7 +30,7 @@ use tracing::{info, warn};
 
 use self::contacts::{Database, Directory, Rescue};
 use self::session::{Identity, Session};
-use crate::config::CompanionConfig;
+use crate::config::{CompanionConfig, RoomConfig};
 use crate::rawlog::RawRecord;
 use crate::writer::Job;
 
@@ -137,6 +137,7 @@ impl Companion {
     /// advertised.
     pub fn spawn(
         config: CompanionConfig,
+        rooms: Vec<RoomConfig>,
         jobs: mpsc::Sender<Job>,
         db_path: PathBuf,
     ) -> Result<Self> {
@@ -145,7 +146,7 @@ impl Companion {
         let (requests, queue) = std_mpsc::channel();
         let thread = std::thread::Builder::new()
             .name("companion".into())
-            .spawn(move || run(&config.device, &jobs, &queue, &Database(db_path), &flag))?;
+            .spawn(move || run(&config.device, &rooms, &jobs, &queue, &Database(db_path), &flag))?;
         Ok(Self { stop, thread, requests })
     }
 
@@ -165,6 +166,7 @@ impl Companion {
 /// Connects, reconnecting after failures, until stopped.
 fn run(
     device: &str,
+    rooms: &[RoomConfig],
     jobs: &mpsc::Sender<Job>,
     requests: &std_mpsc::Receiver<Request>,
     directory: &dyn Directory,
@@ -172,7 +174,7 @@ fn run(
 ) {
     let mut last_error = None;
     while !stop.load(Ordering::Relaxed) {
-        match connect(device, jobs, requests, directory, stop, &mut last_error) {
+        match connect(device, rooms, jobs, requests, directory, stop, &mut last_error) {
             Ok(()) => return,
             Err(e) => {
                 // Say it once, not every few seconds while the radio is away.
@@ -198,6 +200,7 @@ fn run(
 /// One connection. Returns `Ok` once stopped, or if the writer has gone.
 fn connect(
     device: &str,
+    rooms: &[RoomConfig],
     jobs: &mpsc::Sender<Job>,
     requests: &std_mpsc::Receiver<Request>,
     directory: &dyn Directory,
@@ -225,6 +228,11 @@ fn connect(
         ),
         Ok(false) => {}
         Err(refusal) => warn!("couldn't set the companion radio's contact policy: {refusal}"),
+    }
+    // A radio forgets its logins when it restarts, so this runs on every
+    // connection, not just the first.
+    if !rooms.is_empty() {
+        contacts::join_rooms(&mut session, directory, rooms)?;
     }
     serve(&mut session, &format!("companion:{path}"), jobs, requests, directory, stop, POLL)
 }
@@ -294,6 +302,25 @@ fn serve<L: Read + Write>(
             if let Some(record) = record::received(&identity, source, &received)
                 && !send(jobs, record)
             {
+                return Ok(());
+            }
+        }
+        for login in session.take_logins() {
+            let node = login
+                .pubkey_prefix
+                .map(|prefix| name_for(directory, &prefix))
+                .unwrap_or_else(|| "a node".to_owned());
+            let result = match login.accepted {
+                Some(accepted) => {
+                    info!(node = %node, admin = accepted.is_admin(), "logged in");
+                    Ok(accepted.is_admin())
+                }
+                None => {
+                    warn!(node = %node, "login refused: wrong password, or none is set");
+                    Err("login refused")
+                }
+            };
+            if !send(jobs, record::login(&identity, source, Timestamp::now(), &node, result)) {
                 return Ok(());
             }
         }
@@ -429,6 +456,14 @@ fn handle<L: Read + Write>(
             );
             result.map(|_| ())
         }
+    }
+}
+
+/// What a node with this key prefix is called, for the log.
+fn name_for(directory: &dyn Directory, prefix: &[u8; 6]) -> String {
+    match directory.nodes_by_key_prefix(prefix).as_slice() {
+        [node] => node.name.clone().unwrap_or_else(|| hex::encode(prefix)),
+        _ => hex::encode(prefix),
     }
 }
 

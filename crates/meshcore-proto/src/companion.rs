@@ -41,6 +41,8 @@ pub mod command {
     pub const GET_CONTACT_BY_KEY: u8 = 30;
     pub const GET_CHANNEL: u8 = 31;
     pub const SET_CHANNEL: u8 = 32;
+    pub const SEND_LOGIN: u8 = 26;
+    pub const LOGOUT: u8 = 29;
     pub const SET_OTHER_PARAMS: u8 = 38;
     pub const GET_STATS: u8 = 56;
     pub const SET_AUTOADD_CONFIG: u8 = 58;
@@ -70,6 +72,8 @@ pub mod code {
     pub const CHANNEL_DATA_RECV: u8 = 27;
 
     pub const PUSH_ADVERT: u8 = 0x80;
+    pub const PUSH_LOGIN_SUCCESS: u8 = 0x85;
+    pub const PUSH_LOGIN_FAILED: u8 = 0x86;
     pub const PUSH_SEND_CONFIRMED: u8 = 0x82;
     pub const PUSH_MSG_WAITING: u8 = 0x83;
     pub const PUSH_LOG_RX_DATA: u8 = 0x88;
@@ -188,6 +192,20 @@ pub fn send_text(recipient: &[u8; 6], attempt: u8, timestamp: u32, text: &str) -
 
 /// The reply is [`Frame::ChannelInfo`]; unused slots have an empty name and
 /// a zero secret.
+/// Logs in to a node that keeps members: a room server, whose posts then
+/// arrive as messages, or a repeater you administer. The reply is a
+/// [`Frame::Sent`] carrying how long to wait, and then the node answers over
+/// the air with [`Frame::LoggedIn`] or [`Frame::LoginFailed`]. A radio
+/// forgets its logins when it restarts.
+pub fn send_login(pubkey: &[u8; 32], password: &str) -> Vec<u8> {
+    [&[command::SEND_LOGIN][..], pubkey, password.as_bytes()].concat()
+}
+
+/// Ends a session opened by [`send_login`].
+pub fn logout(pubkey: &[u8; 32]) -> Vec<u8> {
+    [&[command::LOGOUT][..], pubkey].concat()
+}
+
 /// Advertises the radio, so others can add it as a contact. A flood advert
 /// crosses the mesh and costs everyone airtime; a zero-hop one reaches only
 /// the radios that hear it directly. The reply is [`Frame::Ok`], or
@@ -340,6 +358,11 @@ pub enum Frame<'a> {
     },
     Sent(Sent),
     SendConfirmed(SendConfirmed),
+    /// A node accepted our login, over the air.
+    LoggedIn(LoggedIn),
+    /// It refused: the wrong password, or none set. Carries the first 6
+    /// bytes of its key, when the firmware sends them.
+    LoginFailed(Option<[u8; 6]>),
     NoMoreMessages,
     ContactMessage(ContactMessage<'a>),
     ChannelMessage(ChannelMessage<'a>),
@@ -375,6 +398,16 @@ impl<'a> Frame<'a> {
             }),
             code::PUSH_SEND_CONFIRMED => {
                 Self::SendConfirmed(SendConfirmed { ack: r.u32_le()?, round_trip_ms: r.u32_le()? })
+            }
+            // Older firmware sends the code alone; newer adds permissions,
+            // whose key prefix, and more we don't need.
+            code::PUSH_LOGIN_SUCCESS => {
+                let permissions = r.u8().unwrap_or(0);
+                Self::LoggedIn(LoggedIn { permissions, pubkey_prefix: r.array().ok().copied() })
+            }
+            code::PUSH_LOGIN_FAILED => {
+                let _reserved = r.u8();
+                Self::LoginFailed(r.array().ok().copied())
             }
             code::NO_MORE_MESSAGES => Self::NoMoreMessages,
             code::CONTACT_MSG_RECV => Self::ContactMessage(ContactMessage::read(&mut r, None)?),
@@ -560,6 +593,20 @@ impl Contact {
             lat_e6: r.i32_le()?,
             lon_e6: r.i32_le()?,
         })
+    }
+}
+
+/// A node let us in. `permissions` bit 0 marks an administrator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoggedIn {
+    pub permissions: u8,
+    /// The first 6 bytes of the node's key, when the firmware sends them.
+    pub pubkey_prefix: Option<[u8; 6]>,
+}
+
+impl LoggedIn {
+    pub const fn is_admin(&self) -> bool {
+        self.permissions & 1 == 1
     }
 }
 
@@ -796,6 +843,18 @@ mod tests {
         );
         assert_eq!(error::describe(error::TABLE_FULL), "table full");
         assert_eq!(
+            Frame::parse(&[code::PUSH_LOGIN_SUCCESS, 1, 1, 2, 3, 4, 5, 6]).unwrap(),
+            Frame::LoggedIn(LoggedIn { permissions: 1, pubkey_prefix: Some([1, 2, 3, 4, 5, 6]) })
+        );
+        let Ok(Frame::LoggedIn(admin)) = Frame::parse(&[code::PUSH_LOGIN_SUCCESS, 1]) else {
+            panic!("a bare success is still a success")
+        };
+        assert!(admin.is_admin() && admin.pubkey_prefix.is_none());
+        assert_eq!(
+            Frame::parse(&[code::PUSH_LOGIN_FAILED, 0, 1, 2, 3, 4, 5, 6]).unwrap(),
+            Frame::LoginFailed(Some([1, 2, 3, 4, 5, 6]))
+        );
+        assert_eq!(
             Frame::parse(&[code::CONTACTS_START, 3, 1, 0, 0]).unwrap(),
             Frame::ContactsStart(259)
         );
@@ -816,6 +875,8 @@ mod tests {
         assert_eq!(get_stats(StatsKind::Packets), [56, 2]);
         assert_eq!(send_self_advert(false), [7, 0]);
         assert_eq!(send_self_advert(true), [7, 1]);
+        assert_eq!(send_login(&[9; 32], "hunter2"), [&[26][..], &[9; 32], b"hunter2"].concat());
+        assert_eq!(logout(&[9; 32]), [&[29][..], &[9; 32]].concat());
     }
 
     #[test]

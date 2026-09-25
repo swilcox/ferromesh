@@ -24,6 +24,9 @@ pub struct Config {
     pub channels: Vec<ChannelConfig>,
     /// A companion radio to record from; none without this section.
     pub companion: Option<CompanionConfig>,
+    /// Room servers to join, so their posts arrive as messages.
+    #[serde(default, rename = "room")]
+    pub rooms: Vec<RoomConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -32,6 +35,26 @@ pub struct CompanionConfig {
     /// The radio's serial port, or `auto` for the one Espressif USB device.
     #[serde(default = "default_device")]
     pub device: String,
+}
+
+/// A room server the companion radio logs in to. Membership lasts until the
+/// radio restarts, so ferromeshd logs in again whenever it reconnects.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoomConfig {
+    /// The room's advertised name, or a hex prefix of its key.
+    pub name: String,
+    /// The room's password. Blank when it has none.
+    #[serde(default)]
+    pub password: String,
+}
+
+/// Prints without the password, so a dump of the config can't leak it.
+impl std::fmt::Debug for RoomConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let password = if self.password.is_empty() { "none" } else { "set" };
+        f.debug_struct("RoomConfig").field("name", &self.name).field("password", &password).finish()
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,6 +111,13 @@ impl Config {
         ensure!(
             config.mqtt.is_some() || config.companion.is_some(),
             "nothing to record: give a [mqtt] broker, a [companion] radio, or both"
+        );
+        for room in &config.rooms {
+            ensure!(!room.name.trim().is_empty(), "every [[room]] needs a name");
+        }
+        ensure!(
+            config.rooms.is_empty() || config.companion.is_some(),
+            "joining a room needs a [companion] radio to join it with"
         );
         if let Some(token) = &config.api.token {
             ensure!(
@@ -163,6 +193,32 @@ mod tests {
     fn something_must_be_recorded() {
         let error = Config::parse("data_dir = \"/data\"\n").unwrap_err().to_string();
         assert!(error.contains("nothing to record"), "{error}");
+    }
+
+    #[test]
+    fn rooms_need_a_radio_and_a_name() {
+        let with = |rooms: &str| Config::parse(&format!("{MINIMAL}[companion]\n{rooms}"));
+        let joined = with("[[room]]\nname = \"PeakMesh Room\"\npassword = \"hunter2\"\n").unwrap();
+        assert_eq!(joined.rooms.len(), 1);
+        assert_eq!(joined.rooms[0].password, "hunter2");
+        // A room without a password is fine; one without a name isn't.
+        assert!(with("[[room]]\nname = \"Open Room\"\n").is_ok());
+        assert!(with("[[room]]\nname = \" \"\n").is_err());
+        // And a room needs a radio to join it with.
+        let no_radio = Config::parse(&format!("{MINIMAL}[[room]]\nname = \"PeakMesh Room\"\n"));
+        assert!(no_radio.unwrap_err().to_string().contains("needs a [companion] radio"));
+    }
+
+    /// A password must never appear in a log line or an error.
+    #[test]
+    fn room_passwords_stay_out_of_debug_output() {
+        let config = Config::parse(&format!(
+            "{MINIMAL}[companion]\n[[room]]\nname = \"R\"\npassword = \"hunter2\"\n"
+        ))
+        .unwrap();
+        let printed = format!("{:?}", config.rooms);
+        assert!(!printed.contains("hunter2"), "{printed}");
+        assert!(printed.contains("password: \"set\""), "{printed}");
     }
 
     #[test]

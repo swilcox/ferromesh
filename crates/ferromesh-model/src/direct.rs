@@ -25,6 +25,14 @@ pub struct DirectMessageInfo {
     pub sender: Option<String>,
     /// The first 6 bytes of the sender's key, lowercase hex.
     pub sender_prefix: String,
+    /// A room post carries its author: the first 4 bytes of their key,
+    /// lowercase hex. The sender is then the room server itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_prefix: Option<String>,
+    /// The author's name, when exactly one known node has that prefix. Four
+    /// bytes collide more easily than six, so this stays quiet when unsure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<String>,
     /// Hops it travelled, or `None` if it came by a direct route.
     pub hops: Option<u8>,
     /// 0 plain, 1 CLI data, 2 signed room-server post.

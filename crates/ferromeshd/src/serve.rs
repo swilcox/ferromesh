@@ -36,7 +36,9 @@ pub async fn run(config: Config) -> Result<()> {
     let companion = config
         .companion
         .clone()
-        .map(|companion| Companion::spawn(companion, jobs.clone(), config.db_path()))
+        .map(|companion| {
+            Companion::spawn(companion, config.rooms.clone(), jobs.clone(), config.db_path())
+        })
         .transpose()?;
     let mut state = AppState::new(config.db_path(), events.clone(), stopped)
         .with_writer(jobs.clone(), config.api.token.clone());

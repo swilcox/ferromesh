@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use meshcore_proto::companion::{
-    self, ChannelInfo, Contact, Deframer, DeviceInfo, Frame, SelfInfo, Sent, StatsKind, autoadd,
-    code, error,
+    self, ChannelInfo, Contact, Deframer, DeviceInfo, Frame, LoggedIn, SelfInfo, Sent, StatsKind,
+    autoadd, code, error,
 };
 use tracing::{debug, info};
 
@@ -64,6 +64,17 @@ pub struct Session<L> {
     timeout: Duration,
     /// The radio's channel slots, read on first use.
     slots: Option<Vec<ChannelInfo>>,
+    /// Login answers that arrived while we were doing something else.
+    logins: Vec<LoginResult>,
+}
+
+/// What a node said when we asked to log in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginResult {
+    /// The first 6 bytes of the node's key, when the firmware sends them.
+    pub pubkey_prefix: Option<[u8; 6]>,
+    /// `None` when it refused.
+    pub accepted: Option<LoggedIn>,
 }
 
 /// Why the radio didn't do what was asked. Unlike an `Err` from these
@@ -109,6 +120,7 @@ impl<L: Read + Write> Session<L> {
             waiting: false,
             timeout,
             slots: None,
+            logins: Vec::new(),
         };
         let reply = session.request(&companion::device_query())?;
         let Frame::DeviceInfo(device) = Frame::parse(&reply)? else {
@@ -206,6 +218,28 @@ impl<L: Read + Write> Session<L> {
     pub fn set_device_time(&mut self, secs: u32) -> Result<Result<(), Refusal>> {
         let reply = self.request(&companion::set_device_time(secs))?;
         Ok(ok_or_refusal(&reply, "setting the clock"))
+    }
+
+    /// Asks to join a room server, or to administer a repeater. The radio
+    /// answers at once with how long the exchange may take; the node's own
+    /// answer arrives later as a push, which [`Session::take_logins`]
+    /// collects.
+    pub fn send_login(
+        &mut self,
+        pubkey: &[u8; 32],
+        password: &str,
+    ) -> Result<Result<Sent, Refusal>> {
+        let reply = self.request(&companion::send_login(pubkey, password))?;
+        Ok(match Frame::parse(&reply)? {
+            Frame::Sent(sent) => Ok(sent),
+            _ => Err(refusal(&reply, "logging in")),
+        })
+    }
+
+    /// Login answers since the last call: whether we got in, and the key
+    /// prefix of whoever answered when the firmware says.
+    pub fn take_logins(&mut self) -> Vec<LoginResult> {
+        std::mem::take(&mut self.logins)
     }
 
     /// Advertises the radio, so other nodes can add it as a contact. A
@@ -423,6 +457,16 @@ impl<L: Read + Write> Session<L> {
                 self.received.push(Received { at: Timestamp::now(), frame });
             }
             code::PUSH_MSG_WAITING => self.waiting = true,
+            code::PUSH_LOGIN_SUCCESS | code::PUSH_LOGIN_FAILED => match Frame::parse(&frame) {
+                Ok(Frame::LoggedIn(accepted)) => self.logins.push(LoginResult {
+                    pubkey_prefix: accepted.pubkey_prefix,
+                    accepted: Some(accepted),
+                }),
+                Ok(Frame::LoginFailed(pubkey_prefix)) => {
+                    self.logins.push(LoginResult { pubkey_prefix, accepted: None });
+                }
+                _ => {}
+            },
             code::PUSH_CONTACTS_FULL => {
                 info!(
                     "companion radio's contact table is full; its oldest contact will be replaced"
@@ -591,7 +635,7 @@ pub(crate) mod tests {
                     ok
                 }
                 command::SET_OTHER_PARAMS => ok,
-                command::SEND_TXT_MSG => {
+                command::SEND_TXT_MSG | command::SEND_LOGIN => {
                     [&[code::SENT, 1][..], &0xACu32.to_le_bytes(), &3000u32.to_le_bytes()].concat()
                 }
                 command::DEVICE_QUERY => device_info_frame(),

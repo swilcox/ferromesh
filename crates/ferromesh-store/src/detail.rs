@@ -87,7 +87,10 @@ pub(crate) fn direct_messages(conn: &Connection, limit: usize) -> Result<Vec<Dir
         "SELECT d.id, d.received_at, coalesce(o.name, lower(hex(o.pubkey))), d.sender_prefix,
                 (SELECT CASE WHEN count(*) = 1 THEN max(n.name) END
                  FROM nodes n WHERE substr(n.pubkey, 1, 6) = d.sender_prefix),
-                d.path_len, d.txt_type, d.sender_timestamp, d.snr, d.body
+                d.path_len, d.txt_type, d.sender_timestamp, d.snr, d.body,
+                d.signer_prefix,
+                (SELECT CASE WHEN count(*) = 1 THEN max(n.name) END
+                 FROM nodes n WHERE substr(n.pubkey, 1, 4) = d.signer_prefix)
          FROM direct_messages d JOIN observers o ON o.id = d.observer_id
          ORDER BY d.received_at DESC, d.id DESC
          LIMIT ?1",
@@ -108,6 +111,8 @@ pub(crate) fn direct_messages(conn: &Connection, limit: usize) -> Result<Vec<Dir
                 })?,
                 snr: row.get(8)?,
                 body: row.get(9)?,
+                author_prefix: row.get::<_, Option<Vec<u8>>>(10)?.map(hex::encode),
+                author: row.get(11)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

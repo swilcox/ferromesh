@@ -34,6 +34,16 @@ listen = "0.0.0.0:7373"
 # [companion]
 # device = "auto"
 
+# Room servers to join. A room stores posts and re-broadcasts them to its
+# members, so its posts arrive as messages once the radio has logged in. The
+# name is the room's advertised name, or a hex prefix of its key; it must have
+# been heard advertising. Needs a [companion] radio. Logging in again after a
+# radio restart is automatic.
+#
+# [[room]]
+# name = "PeakMesh Room"
+# password = "..."
+
 # Channels to decrypt. The public channel is always included.
 # Hashtag channels need only their name. Private channels also need their key,
 # in hex (as in MeshCore QR codes) or base64:

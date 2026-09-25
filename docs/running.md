@@ -56,6 +56,16 @@ token = "..."               # at least 16 characters; openssl rand -hex 24
 
 Anyone who can reach the address can read. Changes — adding a channel, sending a message, pinning a contact — need the token, which clients send as `--token` or `FERROMESH_TOKEN`. Without a token configured, the API is read-only.
 
+### Rooms
+
+```toml
+[[room]]
+name = "PeakMesh Room"      # its advertised name, or a hex prefix of its key
+password = "..."            # omit when the room has none
+```
+
+A room server stores posts and re-broadcasts them to members who have logged in. ferromeshd logs in when it connects to the radio, and again after the radio restarts, since a radio forgets its logins. The room must have been heard advertising, and it's kept as a favourite contact so a full contact table can't evict it. Passwords stay in this file: they're never written to the raw log. See [companion.md](companion.md#rooms).
+
 ### Channels
 
 ```toml

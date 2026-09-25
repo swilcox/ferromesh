@@ -385,7 +385,13 @@ fn dm_lines(
     previous: Option<Timestamp>,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let who = if message.outgoing { "you" } else { "them" };
+    // In a room, every post arrives from the room, so the name that matters
+    // is the author's.
+    let who = match (&message.author, message.outgoing) {
+        (Some(author), _) => author.as_str(),
+        (None, true) => "you",
+        (None, false) => "them",
+    };
     let prefix = vec![
         Span::raw(day_label(app, message.at, previous)).dim(),
         Span::raw(format!("{} ", clock(app, message.at))).dim(),
@@ -808,6 +814,8 @@ mod tests {
             let at = app.now;
             app.apply(Update::Dms(Ok(vec![DirectMessageInfo {
                 id: 1,
+                author: None,
+                author_prefix: None,
                 received_at: at,
                 to: "scw".into(),
                 sender: Some("KK4SW".into()),

@@ -23,9 +23,15 @@ pub async fn list(server: &Server, limit: usize, json: bool) -> Result<()> {
 }
 
 fn row(message: &DirectMessageInfo) -> Vec<String> {
+    // A room post comes from the room, but it's the author you want to see.
+    let from = match (&message.author, &message.author_prefix, &message.sender) {
+        (Some(author), _, Some(room)) => format!("{room} / {author}"),
+        (None, Some(prefix), Some(room)) => format!("{room} / {prefix}"),
+        (_, _, sender) => sender.clone().unwrap_or_else(|| "?".into()),
+    };
     vec![
         local(message.received_at),
-        message.sender.clone().unwrap_or_else(|| "?".into()),
+        from,
         message.sender_prefix.clone(),
         message.hops.map_or_else(|| "direct".into(), |hops| hops.to_string()),
         message.snr.map(|snr| format!("{snr:.1}")).unwrap_or_default(),

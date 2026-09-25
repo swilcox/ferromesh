@@ -11,6 +11,7 @@ use ferromesh_model::{
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
+use meshcore_proto::companion::txt_type;
 use meshcore_proto::mention;
 
 use crate::config::WatchConfig;
@@ -153,6 +154,9 @@ pub struct DmLine {
     pub at: Timestamp,
     /// Sent by us, rather than received.
     pub outgoing: bool,
+    /// Who wrote it, when it's a room post rather than a message from the
+    /// node itself.
+    pub author: Option<String>,
     pub body: String,
     /// Hops it travelled, for a received message.
     pub hops: Option<u8>,
@@ -510,9 +514,16 @@ impl App {
         let mut threads: BTreeMap<String, Vec<DmLine>> = BTreeMap::new();
         for dm in self.dms.as_deref().unwrap_or_default() {
             let who = dm.sender.clone().unwrap_or_else(|| dm.sender_prefix.clone());
+            // A room's posts all come from the room; the author is inside.
+            let author = dm
+                .author
+                .clone()
+                .or_else(|| dm.author_prefix.clone())
+                .filter(|_| dm.txt_type == txt_type::SIGNED_PLAIN);
             threads.entry(who).or_default().push(DmLine {
                 at: dm.received_at,
                 outgoing: false,
+                author,
                 body: dm.body.clone(),
                 hops: dm.hops,
                 snr: dm.snr,
@@ -525,6 +536,7 @@ impl App {
             threads.entry(sent.to.clone()).or_default().push(DmLine {
                 at: sent.sent_at,
                 outgoing: true,
+                author: None,
                 body: sent.body.clone(),
                 hops: None,
                 snr: None,

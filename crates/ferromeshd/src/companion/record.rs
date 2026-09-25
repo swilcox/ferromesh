@@ -8,7 +8,8 @@
 //!   they came from.
 //! - `sent` describes a message ferromesh asked the radio to send, and how
 //!   the radio answered.
-//! - `advert` notes that ferromesh asked the radio to advertise itself.
+//! - `advert` notes that ferromesh asked the radio to advertise itself, and
+//!   `login` what a room server or repeater said when asked to let it in.
 
 use anyhow::{Context, Result, bail};
 use ferromesh_store::{
@@ -76,6 +77,22 @@ pub fn status(identity: &Identity, source: &str, at: Timestamp, frames: &[Vec<u8
         "frames": frames,
     });
     record(identity, source, "status", at, payload)
+}
+
+/// What a room server or repeater said when the radio asked to log in.
+/// The password isn't recorded, here or anywhere else.
+pub fn login(
+    identity: &Identity,
+    source: &str,
+    at: Timestamp,
+    node: &str,
+    result: Result<bool, &str>,
+) -> RawRecord {
+    let payload = match result {
+        Ok(admin) => json!({ "origin": identity.info.name, "node": node, "admin": admin }),
+        Err(error) => json!({ "origin": identity.info.name, "node": node, "error": error }),
+    };
+    record(identity, source, "login", at, payload)
 }
 
 /// An advert ferromesh asked the radio to transmit. `error` says why it
@@ -181,7 +198,7 @@ pub fn parse(record: &RawRecord) -> Result<Message> {
     if kind == "sent" {
         return Ok(Message::Sent(sent_message(observer, at, &fields)?));
     }
-    if kind == "advert" {
+    if kind == "advert" || kind == "login" {
         return Ok(Message::Ignored);
     }
     let frame = fields.get("frame").and_then(Value::as_str).context("no frame")?;

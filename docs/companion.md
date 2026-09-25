@@ -52,6 +52,22 @@ The TUI's Contacts view (`8`) shows the same list, with `p` to keep a contact or
 
 **Rescue.** A companion can only decrypt a direct message from a node it has as a contact. If a message arrives that the radio can't read, because it has never heard the sender or has since forgotten them, ferromesh adds every node in its own records that could have sent it, so the sender's automatic retry can be read. This is why a first message from a stranger usually lands on their second try.
 
+## Rooms
+
+A room server is a node that keeps posts and re-broadcasts them to its members. Socially it's a channel; on the wire it's direct messages to and from one node, so joining one is a login rather than a key:
+
+```toml
+[[room]]
+name = "PeakMesh Room"
+password = "..."
+```
+
+ferromeshd logs in on connect and again whenever the radio restarts, because a radio forgets its logins. Joining is deliberate — the contact policy adds only chat radios — so the room is added as a favourite contact, which also protects it from being replaced.
+
+Posts then arrive like any other message the radio hands over, and appear as a conversation with the room. Each post carries a 4-byte prefix of its author's key, so ferromesh names the author when exactly one node it has heard matches; four bytes collide more easily than the six a direct message carries, so it stays quiet rather than guess.
+
+Posting takes nothing special: a post is a plain message to the room server, which re-broadcasts it. `ferromesh send 'PeakMesh Room' hello` works once you've joined, as does `c` in the TUI.
+
 ## Limits worth knowing
 
 - **One client only.** Don't pair a phone with the radio while ferromeshd is using it.
