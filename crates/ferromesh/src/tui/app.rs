@@ -14,6 +14,7 @@ use jiff::tz::TimeZone;
 use meshcore_proto::companion::txt_type;
 use meshcore_proto::mention;
 
+use super::emoji::{self, Suggestion};
 use crate::config::WatchConfig;
 
 /// Events kept per feed; live events push the oldest out beyond this.
@@ -199,6 +200,32 @@ pub struct Input {
     pub prompt: Prompt,
     pub text: String,
     pub error: Option<String>,
+    /// The highlighted emoji suggestion.
+    pub pick: usize,
+    /// Suggestions put away with Esc, until the text changes.
+    pub hush: bool,
+}
+
+impl Input {
+    fn new(prompt: Prompt, text: String) -> Self {
+        Self { prompt, text, error: None, pick: 0, hush: false }
+    }
+
+    /// Emoji for the `:shortcode` being typed in a message.
+    pub fn suggestions(&self) -> Vec<Suggestion> {
+        match emoji::pending(&self.text) {
+            Some((_, query)) if self.prompt == Prompt::Compose && !self.hush => {
+                emoji::suggest(query)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn edited(&mut self) {
+        self.error = None;
+        self.pick = 0;
+        self.hush = false;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -679,8 +706,7 @@ impl App {
         };
         self.compose_to = Some(channel);
         let prefix = sender.map(|sender| format!("{} ", mention::wrap(&sender)));
-        self.input =
-            Some(Input { prompt: Prompt::Compose, text: prefix.unwrap_or_default(), error: None });
+        self.input = Some(Input::new(Prompt::Compose, prefix.unwrap_or_default()));
     }
 
     /// Opens a conversation with whatever is selected in the nodes or
@@ -1118,16 +1144,16 @@ impl App {
             return;
         }
         if prompt == Prompt::Recipient {
-            self.input = Some(Input { prompt, text: String::new(), error: None });
+            self.input = Some(Input::new(prompt, String::new()));
             return;
         }
         if prompt == Prompt::Advert {
-            self.input = Some(Input { prompt, text: String::new(), error: None });
+            self.input = Some(Input::new(prompt, String::new()));
             return;
         }
         if prompt == Prompt::Compose {
             match self.compose_target() {
-                Some(_) => self.input = Some(Input { prompt, text: String::new(), error: None }),
+                Some(_) => self.input = Some(Input::new(prompt, String::new())),
                 None if self.view == View::Dms => {
                     self.status = Some("no conversation to reply to yet".into());
                 }
@@ -1144,7 +1170,7 @@ impl App {
             }
             _ => String::new(),
         };
-        self.input = Some(Input { prompt, text, error: None });
+        self.input = Some(Input::new(prompt, text));
     }
 
     fn input_key(&mut self, key: KeyEvent) -> Vec<Command> {
@@ -1154,6 +1180,32 @@ impl App {
         let Some(input) = &mut self.input else {
             return Vec::new();
         };
+        let suggestions = input.suggestions();
+        if !suggestions.is_empty() {
+            let pick = input.pick.min(suggestions.len() - 1);
+            match key.code {
+                KeyCode::Tab | KeyCode::Enter => {
+                    if let Some(text) = emoji::accept(&input.text, suggestions[pick].emoji) {
+                        input.text = text;
+                        input.edited();
+                    }
+                    return Vec::new();
+                }
+                KeyCode::Up => {
+                    input.pick = pick.checked_sub(1).unwrap_or(suggestions.len() - 1);
+                    return Vec::new();
+                }
+                KeyCode::Down => {
+                    input.pick = (pick + 1) % suggestions.len();
+                    return Vec::new();
+                }
+                KeyCode::Esc => {
+                    input.hush = true;
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
         match key.code {
             KeyCode::Esc => {
                 self.input = None;
@@ -1162,11 +1214,16 @@ impl App {
             KeyCode::Enter => return self.submit(),
             KeyCode::Backspace => {
                 input.text.pop();
-                input.error = None;
+                input.edited();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 input.text.push(c);
-                input.error = None;
+                if input.prompt == Prompt::Compose
+                    && let Some(text) = emoji::close(&input.text)
+                {
+                    input.text = text;
+                }
+                input.edited();
             }
             _ => {}
         }
@@ -1639,6 +1696,48 @@ mod tests {
 
         press(&mut app, KeyCode::Char('c'));
         assert_eq!(press(&mut app, KeyCode::Enter), [], "nothing to send");
+    }
+
+    #[test]
+    fn emoji_shortcodes_complete_in_a_message() {
+        let mut app = with_history(Vec::new());
+        app.select_channel(Some("#test".into()));
+        press(&mut app, KeyCode::Char('c'));
+
+        type_text(&mut app, "party :tad");
+        assert_eq!(app.input.as_ref().unwrap().suggestions()[0].emoji, "🎉");
+        assert_eq!(press(&mut app, KeyCode::Enter), [], "Enter takes the suggestion");
+        assert_eq!(app.input.as_ref().unwrap().text, "party 🎉");
+
+        type_text(&mut app, " :thumbsup:");
+        assert_eq!(app.input.as_ref().unwrap().text, "party 🎉 👍", "a closing colon swaps it");
+
+        type_text(&mut app, " :smil");
+        press(&mut app, KeyCode::Down);
+        let second = app.input.as_ref().unwrap().suggestions()[1].emoji;
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.input.as_ref().unwrap().text, format!("party 🎉 👍 {second}"));
+
+        type_text(&mut app, " :qqx");
+        assert!(app.input.as_ref().unwrap().suggestions().is_empty());
+        press(&mut app, KeyCode::Esc);
+        assert!(app.input.is_none(), "Esc with no suggestions still cancels");
+        press(&mut app, KeyCode::Char('c'));
+        type_text(&mut app, "at 12:30 :sm");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.input.as_ref().unwrap().suggestions().is_empty(), "put away");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            [Command::Send { to: "#test".into(), text: "at 12:30 :sm".into() }]
+        );
+    }
+
+    #[test]
+    fn only_messages_suggest_emoji() {
+        let mut app = with_history(Vec::new());
+        press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "chan:sm");
+        assert!(app.input.as_ref().unwrap().suggestions().is_empty());
     }
 
     #[test]

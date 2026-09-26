@@ -5,6 +5,7 @@
 //! older history on request.
 
 mod app;
+mod emoji;
 mod inspect;
 mod lists;
 mod overlay;

@@ -191,6 +191,7 @@ const HELP: &[(&str, &str)] = &[
     ("p", "keep a contact, or a node, on the radio"),
     ("n m", "write to someone: by name (DMs), or selected"),
     ("r", "reply on the channel, naming the sender"),
+    (":tada", "in a message: pick an emoji with Tab, ↑ ↓"),
     ("d", "delete the selected watch"),
     ("c", "clear alerts"),
     ("b", "bell on or off"),

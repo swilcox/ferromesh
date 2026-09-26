@@ -10,10 +10,10 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::app::{App, Connection, Conversation, DmLine, Prompt, View};
-use super::{lists, overlay};
+use super::app::{App, Connection, Conversation, DmLine, Input, Prompt, View};
+use super::{emoji, lists, overlay};
 use crate::render::name_hash;
 
 /// Names are coloured by hash, as in `tail`.
@@ -119,6 +119,43 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(status, right);
 }
 
+/// Emoji for the `:shortcode` being typed, in a box above the input line
+/// that starts under its colon.
+fn draw_suggestions(frame: &mut Frame, input_area: Rect, column: u16, input: &Input) {
+    let suggestions = input.suggestions();
+    if suggestions.is_empty() {
+        return;
+    }
+    let pick = input.pick.min(suggestions.len() - 1);
+    let lines: Vec<Line> = suggestions
+        .iter()
+        .enumerate()
+        .map(|(i, suggestion)| {
+            let line = Line::from(vec![
+                Span::raw(format!(" {} ", suggestion.emoji)),
+                Span::raw(format!(":{}: ", suggestion.shortcode)),
+            ]);
+            if i == pick { line.style(Style::new().black().on_cyan()) } else { line }
+        })
+        .collect();
+    let width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 2;
+    let height = lines.len() as u16 + 2;
+    let screen = frame.area();
+    let width = width.min(screen.width);
+    let height = height.min(input_area.y.saturating_sub(screen.y));
+    let x = (input_area.x + column).min(screen.right().saturating_sub(width));
+    let area = Rect { x, y: input_area.y - height, width, height };
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(
+            Block::bordered()
+                .border_style(Color::DarkGray)
+                .title_bottom(Line::from(" Tab pick · ↑↓ · Esc ").dim()),
+        ),
+        area,
+    );
+}
+
 /// Each stream's connection, with labels and the server's address when
 /// there's room for them.
 fn feeds_status(app: &App, verbose: bool) -> Line<'static> {
@@ -161,6 +198,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         }
         frame.render_widget(Line::from(spans), area);
         frame.set_cursor_position((area.x + cursor.min(area.width.saturating_sub(1)), area.y));
+        if let Some((colon, _)) = emoji::pending(&input.text) {
+            let code = Line::raw(&input.text[colon..]).width() as u16;
+            draw_suggestions(frame, area, cursor.saturating_sub(code), input);
+        }
         return;
     }
 
@@ -953,6 +994,23 @@ mod tests {
             press(&mut app, KeyCode::Char('m'));
             type_in(&mut app, "yo");
             assert_eq!(enter(&mut app), [Command::Send { to: "Alice".into(), text: "yo".into() }]);
+        }
+
+        #[test]
+        fn emoji_suggestions_sit_above_the_compose_line() {
+            let mut app = app();
+            press(&mut app, KeyCode::Char('r'));
+            for key in "hi :tad".chars() {
+                press(&mut app, KeyCode::Char(key));
+            }
+            let lines = render(&app, 80, 12);
+            let footer = lines.len() - 1;
+            assert!(lines[footer].starts_with("message #wx: @[Bob] hi :tad"), "{lines:#?}");
+            let column = |line: &str, c: char| line.chars().position(|x| x == c);
+            let first = lines.iter().position(|line| line.contains(":tada:")).unwrap();
+            assert!(first < footer, "{lines:#?}");
+            // The box starts under the colon that began the code.
+            assert_eq!(column(&lines[first - 1], '┌'), Some("message #wx: @[Bob] hi ".len()));
         }
 
         #[test]
