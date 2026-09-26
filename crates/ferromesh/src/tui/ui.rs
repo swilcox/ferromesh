@@ -6,7 +6,7 @@ use ferromesh_model::{Event, Kind, SendStatus};
 use jiff::Timestamp;
 use meshcore_proto::mention;
 use ratatui::Frame;
-use ratatui::buffer::Buffer;
+use ratatui::buffer::{Buffer, CellDiffOption};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -64,6 +64,30 @@ pub fn draw(frame: &mut Frame, app: &App, screen: &mut Screen) {
     }
     if app.help {
         overlay::draw_help(frame, body);
+    }
+    skip_emoji_tails(frame.buffer_mut());
+}
+
+/// Keeps ratatui from writing the hidden second column of an emoji like
+/// `⚡️` or `☠️` (one with U+FE0F). Its diff sends that column on purpose, but
+/// the crossterm backend moves the cursor only when a cell isn't one to the
+/// right of the last, so the blank lands a column further on, shifting the
+/// rest of the row and leaving old text behind where ratatui thinks it has
+/// drawn. The terminal clears the column itself when it draws the emoji.
+fn skip_emoji_tails(buffer: &mut Buffer) {
+    let area = buffer.area;
+    for y in area.top()..area.bottom() {
+        let mut x = area.left();
+        while x < area.right() {
+            let symbol = buffer[(x, y)].symbol();
+            let width = Span::raw(symbol).width().max(1) as u16;
+            if width > 1 && symbol.contains('\u{fe0f}') {
+                for tail in x + 1..(x + width).min(area.right()) {
+                    buffer[(tail, y)].set_diff_option(CellDiffOption::Skip);
+                }
+            }
+            x += width;
+        }
     }
 }
 
@@ -1073,6 +1097,77 @@ mod tests {
                 press(&mut app, KeyCode::Char('1'));
                 press(&mut app, KeyCode::Enter);
                 render(&app, width, height);
+            }
+        }
+
+        /// What a terminal shows after each frame's bytes, cell for cell, matches
+        /// what ratatui believes it drew.
+        #[test]
+        fn emoji_with_a_variation_selector_leave_nothing_behind() {
+            use std::cell::RefCell;
+            use std::io;
+            use std::rc::Rc;
+
+            use ratatui::backend::CrosstermBackend;
+            use ratatui::{TerminalOptions, Viewport};
+
+            #[derive(Clone, Default)]
+            struct Tap(Rc<RefCell<Vec<u8>>>);
+            impl io::Write for Tap {
+                fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                    self.0.borrow_mut().extend_from_slice(bytes);
+                    Ok(bytes.len())
+                }
+                fn flush(&mut self) -> io::Result<()> {
+                    Ok(())
+                }
+            }
+
+            let (width, height) = (100, 6);
+            let tap = Tap::default();
+            let viewport = Viewport::Fixed(Rect::new(0, 0, width, height));
+            let mut terminal = Terminal::with_options(
+                CrosstermBackend::new(tap.clone()),
+                TerminalOptions { viewport },
+            )
+            .unwrap();
+            let mut screen = vt100::Parser::new(height, width, 0);
+            let mut app = app();
+            // Each arrival scrolls the rows up, moving ⚡️ over other text.
+            for (id, sender) in [(2, "Ann"), (3, "⚡️KE4KAA⚡️"), (4, "Bob"), (5, "Cy"), (6, "Dee")]
+            {
+                app.apply(Update::Event(Event::Message(MessageEvent {
+                    id,
+                    packet_hash: format!("{id:016X}"),
+                    first_seen_at: app.now,
+                    channel: "#wx".into(),
+                    sender: Some(sender.into()),
+                    body: "/test".into(),
+                    sender_timestamp: 0,
+                    txt_type: 0,
+                    attempt: 0,
+                    heard: id,
+                })));
+                let drawn = terminal
+                    .draw(|frame| draw(frame, &app, &mut Screen::default()))
+                    .unwrap()
+                    .buffer
+                    .clone();
+                screen.process(&std::mem::take(&mut *tap.0.borrow_mut()));
+                for y in 0..height {
+                    for x in 0..width {
+                        let cell = screen.screen().cell(y, x).unwrap();
+                        let shown = match cell.contents() {
+                            "" => " ",
+                            text => text,
+                        };
+                        assert!(
+                            cell.is_wide_continuation() || drawn[(x, y)].symbol() == shown,
+                            "after message {id}, ({x}, {y}) shows {shown:?}:\n{}",
+                            screen.screen().contents()
+                        );
+                    }
+                }
             }
         }
     }
