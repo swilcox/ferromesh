@@ -74,6 +74,10 @@ pub fn draw(frame: &mut Frame, app: &App, screen: &mut Screen) {
 /// right of the last, so the blank lands a column further on, shifting the
 /// rest of the row and leaving old text behind where ratatui thinks it has
 /// drawn. The terminal clears the column itself when it draws the emoji.
+///
+/// Fixed upstream by ratatui/ratatui#2721 (for #2651), unreleased as of
+/// ratatui-crossterm 0.1.2. Drop this once a release carries it; the
+/// `emoji_with_a_variation_selector_leave_nothing_behind` test will say so.
 fn skip_emoji_tails(buffer: &mut Buffer) {
     let area = buffer.area;
     for y in area.top()..area.bottom() {
