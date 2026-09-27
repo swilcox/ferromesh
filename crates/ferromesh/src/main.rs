@@ -165,6 +165,9 @@ enum Command {
         /// With --snapshot, the screen size. [default: 120x40]
         #[arg(long, requires = "snapshot", value_parser = parse_size)]
         size: Option<(u16, u16)>,
+        /// With --snapshot, print an SVG picture of the terminal instead of text.
+        #[arg(long, requires = "snapshot")]
+        svg: bool,
     },
 }
 
@@ -297,11 +300,11 @@ async fn run(cli: Cli) -> Result<()> {
                 channels::guess(&server, request, add, token).await
             }
         },
-        Command::Tui { snapshot, keys, size } => {
+        Command::Tui { snapshot, keys, size, svg } => {
             let snapshot = if snapshot {
                 let (width, height) = size.unwrap_or((120, 40));
                 let keys = tui::parse_keys(keys.as_deref().unwrap_or_default())?;
-                Some(tui::Snapshot { width, height, keys })
+                Some(tui::Snapshot { width, height, keys, svg })
             } else {
                 None
             };

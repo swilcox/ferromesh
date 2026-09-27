@@ -9,6 +9,7 @@ mod emoji;
 mod inspect;
 mod lists;
 mod overlay;
+mod svg;
 mod ui;
 
 use std::io::{self, Write};
@@ -54,6 +55,8 @@ pub struct Snapshot {
     pub height: u16,
     /// Pressed, in order, once everything has loaded.
     pub keys: Vec<KeyEvent>,
+    /// An SVG picture of the terminal instead of plain text.
+    pub svg: bool,
 }
 
 /// `token` is the server's API token, which sending needs.
@@ -158,9 +161,14 @@ async fn snap(
     app.now = Timestamp::now();
     let mut terminal = Terminal::new(TestBackend::new(snapshot.width, snapshot.height))?;
     terminal.draw(|frame| ui::draw(frame, &app, &mut Screen::default()))?;
+    let buffer = terminal.backend().buffer();
     let mut out = io::stdout().lock();
-    for line in ui::text_lines(terminal.backend().buffer()) {
-        writeln!(out, "{line}")?;
+    if snapshot.svg {
+        write!(out, "{}", svg::render(buffer, "ferromesh tui"))?;
+    } else {
+        for line in ui::text_lines(buffer) {
+            writeln!(out, "{line}")?;
+        }
     }
     Ok(())
 }

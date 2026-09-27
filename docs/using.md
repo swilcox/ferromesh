@@ -164,3 +164,5 @@ For scripting or a screenshot, the TUI can render one screen as plain text and e
 ```sh
 ferromesh tui --snapshot --size 120x40 --keys '4<enter>'
 ```
+
+`--svg` draws it as a picture of a terminal instead, colours and all; that's how the README's screenshots are made (`tools/screenshots.sh`, from invented traffic).

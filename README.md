@@ -9,6 +9,8 @@
 
 A MeshCore radio shows you the messages meant for you. ferromesh keeps the rest: every packet, every reception, who heard what and how strongly, and what it all decodes to. It listens through a **companion radio** on USB, through an **MQTT broker** fed by observer repeaters, or both, and serves it all to a command line and a terminal UI.
 
+<img alt="The terminal UI's Messages view: a channel list beside one feed of every channel, each message with how many radios heard it." src="docs/screenshots/messages.svg">
+
 ## What you can do
 
 - **Follow every channel in one live feed.** Each message is shown once, with a count of how many radios heard it.
@@ -20,6 +22,19 @@ A MeshCore radio shows you the messages meant for you. ferromesh keeps the rest:
 - **Know your radios are well.** Battery, noise floor, airtime and restarts over time, plus a check that every packet a repeater counted actually reached the database.
 - **Build on it.** An HTTP API for history and a WebSocket stream that resumes where it left off, JSON throughout.
 - **Never lose anything.** Every record is appended verbatim to a raw log before it touches the database, so the database can always be rebuilt and checked against it.
+
+<details>
+<summary>More of the terminal UI</summary>
+
+Every reception, with signal strength and the repeaters it came through:
+
+<img alt="The RF view: one row per reception, with observer, packet type, hop count, an SNR bar, RSSI and the path by repeater name." src="docs/screenshots/rf.svg">
+
+Each observer's health, with a day of hourly trends:
+
+<img alt="The Health view: battery, noise floor, packets, errors, airtime and delivery for three observers, each with a sparkline." src="docs/screenshots/health.svg">
+
+</details>
 
 **Status:** early, and in daily use. Everything above works. A web UI, a Home Assistant bridge and radio configuration are planned; see [PLAN.md](PLAN.md).
 
