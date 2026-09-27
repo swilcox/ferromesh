@@ -5,62 +5,32 @@
 [![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-orange?logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Records and explores [MeshCore](https://github.com/meshcore-dev/MeshCore) mesh traffic, in Rust.
+**Record everything your [MeshCore](https://github.com/meshcore-dev/MeshCore) mesh says. Search it, watch it live, and talk back, all from a terminal.**
 
-ferromesh listens to a MeshCore mesh, keeps everything it hears verbatim, decodes what it can, and stores it in SQLite. A command-line client and a terminal UI then show history, follow live traffic, raise alerts on what you care about, and send messages back through your own radio.
+A MeshCore radio shows you the messages meant for you. ferromesh keeps the rest: every packet, every reception, who heard what and how strongly, and what it all decodes to. It listens through a **companion radio** on USB, through an **MQTT broker** fed by observer repeaters, or both, and serves it all to a command line and a terminal UI.
 
-It listens through a **companion radio** plugged into USB, through an **MQTT broker** fed by observer repeaters, or both at once.
+## What you can do
 
-**Status:** early, and in daily use. Decoding, storage, the API, channel discovery, the CLI, the terminal UI, health monitoring, and sending through a companion radio all work. A web UI, a Home Assistant bridge, and radio configuration are planned; see [PLAN.md](PLAN.md).
+- **Follow every channel in one live feed.** Each message is shown once, with a count of how many radios heard it.
+- **Read channels you couldn't before.** Encrypted traffic is stored even when nobody can read it. Add a key, or let `ferromesh channels guess` find hashtag channels, and the history that was waiting decodes.
+- **Search the history.** One filter language covers sender, channel, text, packet type, signal and hop count, in the CLI, the TUI and alerts alike: `ferromesh query from:BNA* storm --since 6h`.
+- **See signal and coverage.** Every reception carries its SNR, RSSI and path, with repeaters named along the route. Open any packet to see it from every radio that heard it, its bytes labelled field by field.
+- **Message from the terminal.** Send to channels and nodes, keep DM conversations, post to room servers, and see who heard your message or whether it was acknowledged.
+- **Get alerted.** Save any filter as a watch. Matching traffic is highlighted, rings the bell, and lands in the Alerts view.
+- **Know your radios are well.** Battery, noise floor, airtime and restarts over time, plus a check that every packet a repeater counted actually reached the database.
+- **Build on it.** An HTTP API for history and a WebSocket stream that resumes where it left off, JSON throughout.
+- **Never lose anything.** Every record is appended verbatim to a raw log before it touches the database, so the database can always be rebuilt and checked against it.
 
-## What it's for
-
-A MeshCore radio shows you the messages meant for you. ferromesh keeps the rest: every packet, every reception, who heard what and how strongly, and what it all decodes to.
-
-That makes it useful for:
-
-- **Watching a mesh.** Every channel in one feed, with each message shown once and a count of how many radios heard it.
-- **Signal and coverage work.** Every reception with its SNR, RSSI and path, so you can see which repeaters carry which traffic and how many hops it took.
-- **Knowing your radios are well.** Battery, noise floor, airtime, restarts, and a check that every packet a repeater counted receiving actually reached the database.
-- **History that grows backwards.** Encrypted channel traffic is stored even when nobody can read it, so adding a key later decodes everything that was waiting.
-- **Messaging from a terminal, or a script.** Send to a channel or a node and watch who heard it, over the API.
+**Status:** early, and in daily use. Everything above works. A web UI, a Home Assistant bridge and radio configuration are planned; see [PLAN.md](PLAN.md).
 
 ## How it fits together
 
-```mermaid
-flowchart LR
-    mesh["MeshCore mesh<br/>nodes · repeaters · room servers"]
-    rptr["observer repeater<br/>(observer firmware<br/>or meshcoretomqtt)"]
-    broker["MQTT broker"]
-    radio["companion radio<br/>(stock firmware, USB)"]
-    daemon["ferromeshd<br/>decode · store · serve"]
-    raw[("raw log<br/>every record verbatim")]
-    db[("SQLite<br/>packets · messages<br/>nodes · health")]
-    api["HTTP + WebSocket API<br/>port 7373"]
-    cli["ferromesh CLI"]
-    tui["ferromesh tui"]
-    web["web UI"]
-    ha["Home Assistant"]
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/architecture-dark.svg">
+  <img alt="A MeshCore mesh is heard by observer repeaters publishing to an MQTT broker, and by a companion radio on USB. ferromeshd appends every record to a raw log, decodes it into SQLite, and serves an HTTP and WebSocket API to the ferromesh CLI, the terminal UI and your own tools." src="docs/architecture-light.svg">
+</picture>
 
-    mesh -. RF .-> rptr
-    rptr --> broker
-    broker --> daemon
-    mesh -. RF .-> radio
-    radio <-- USB --> daemon
-    daemon --> raw
-    raw --> db
-    db --> api
-    daemon --> api
-    api --> cli
-    api --> tui
-    api -. planned .-> web
-    daemon -. planned .-> ha
-
-    classDef planned stroke-dasharray: 5 5
-    class web,ha planned
-```
-
-Everything reaching the daemon is appended to the raw log before it touches the database, so the database can always be rebuilt from scratch and checked against itself. The clients only ever talk to the API, so they run from any machine on the network.
+The clients only ever talk to the API, so they run from any machine on the network.
 
 ## Ways to run it
 

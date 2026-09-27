@@ -10,6 +10,7 @@
 | `crates/ferromeshd` | The server: MQTT and companion ingest, the raw log, the HTTP/WebSocket API, and the `import`, `rebuild` and `stats` commands. |
 | `crates/ferromesh` | The client: `tail`, `query`, `channels`, `dms`, `health`, `send`, `contacts`, and the `tui`. |
 | `tools/gen_fixture.py` | Builds the golden-test fixture from a capture. |
+| `tools/architecture_svg.py` | Draws the README's architecture diagram, light and dark. |
 
 The shape of it: a source produces a **raw record** (a topic and a JSON payload), which is appended to the raw log and then parsed into a `Message` by `source::parse`. Sources therefore differ only in how they produce records — MQTT messages arrive as they come, and the companion's frames are wrapped into records under `companion/<pubkey>/...` topics — and everything downstream is shared. That's also why a rebuild from the raw log reproduces the database exactly.
 
