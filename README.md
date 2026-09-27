@@ -1,5 +1,10 @@
 # ferromesh
 
+[![CI](https://github.com/swilcox/ferromesh/actions/workflows/ci.yml/badge.svg)](https://github.com/swilcox/ferromesh/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/swilcox/ferromesh/badges/coverage.json)](https://github.com/swilcox/ferromesh/actions/workflows/ci.yml)
+[![Rust 1.94+](https://img.shields.io/badge/rust-1.94%2B-orange?logo=rust)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 Records and explores [MeshCore](https://github.com/meshcore-dev/MeshCore) mesh traffic, in Rust.
 
 ferromesh listens to a MeshCore mesh, keeps everything it hears verbatim, decodes what it can, and stores it in SQLite. A command-line client and a terminal UI then show history, follow live traffic, raise alerts on what you care about, and send messages back through your own radio.

@@ -27,3 +27,49 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # The golden tests skip here: their real-traffic fixture is never committed.
       - run: cargo test --workspace --locked
+
+  coverage:
+    name: coverage
+    runs-on: ubuntu-latest
+    permissions:
+      # Only to push the badge to the badges branch, and only from main.
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.94"
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - run: cargo llvm-cov --workspace --locked --no-report
+      - name: Report
+        run: |
+          cargo llvm-cov report --summary-only | tee summary.txt
+          cargo llvm-cov report --json --summary-only --output-path coverage.json
+          pct=$(jq '.data[0].totals.lines.percent' coverage.json)
+          printf '%.1f' "$pct" > pct.txt
+          {
+            echo "### Line coverage: $(cat pct.txt)%"
+            echo '```'
+            cat summary.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # A shields.io endpoint file, force-pushed as the only commit on the badges branch.
+      - name: Publish badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          pct=$(cat pct.txt)
+          color=$(awk -v p="$pct" 'BEGIN {
+            if (p >= 90) print "brightgreen"; else if (p >= 80) print "green";
+            else if (p >= 70) print "yellowgreen"; else if (p >= 60) print "yellow";
+            else print "orange" }')
+          mkdir badges && cd badges
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$pct" "$color" > coverage.json
+          git init -q -b badges
+          git add coverage.json
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com \
+            commit -q -m "Coverage $pct%"
+          git push -q --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges

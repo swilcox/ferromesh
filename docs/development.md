@@ -23,7 +23,13 @@ cargo clippy --workspace --all-targets
 cargo fmt --check
 ```
 
-CI runs all three on every push.
+CI runs all three on every push, and measures line coverage with [cargo-llvm-cov](https://github.com/taiki-e/cargo-llvm-cov); the README badge is updated from `main`. To see it locally, per file:
+
+```sh
+cargo install cargo-llvm-cov
+cargo llvm-cov --workspace --summary-only
+cargo llvm-cov --workspace --open    # annotated source in a browser
+```
 
 Unit tests cover the codecs, the store and the client's rendering; integration tests cover the API, including stream resume, filters and a lagging consumer catching up. The companion tests drive a fake radio, so they exercise the session logic with no hardware.
 
