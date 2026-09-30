@@ -208,6 +208,12 @@ CREATE INDEX observations_by_observer ON observations (observer_id, rx_at);
 -- NULL until the observer is heard from again.
 ALTER TABLE observers ADD COLUMN kind TEXT;
 "#,
+    r#"
+-- Where each channel sits in lists, lowest first. Only presentation: the
+-- order decryption tries keys in stays by id. Starts as the order added.
+ALTER TABLE channels ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
+UPDATE channels SET position = id;
+"#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {

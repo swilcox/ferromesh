@@ -28,6 +28,8 @@ pub enum Job {
         kind: ChannelKind,
         reply: oneshot::Sender<Result<AddOutcome>>,
     },
+    /// Put these channels first in lists, in this order.
+    OrderChannels { names: Vec<String>, reply: oneshot::Sender<ferromesh_store::Result<()>> },
     /// Replies once every earlier job is done.
     Sync(oneshot::Sender<()>),
 }
@@ -82,6 +84,9 @@ impl Writer {
                 }
                 pipeline::publish(&mut self.store, &self.events)?;
                 let _ = reply.send(outcome);
+            }
+            Job::OrderChannels { names, reply } => {
+                let _ = reply.send(self.store.order_channels(&names));
             }
             Job::Sync(reply) => {
                 self.flush()?;

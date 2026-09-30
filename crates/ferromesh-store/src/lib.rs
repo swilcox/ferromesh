@@ -186,7 +186,8 @@ impl Store {
         added_at: Micros,
     ) -> Result<bool> {
         let added = self.conn.execute(
-            "INSERT INTO channels (name, secret, hash, kind, added_at) VALUES (?1, ?2, ?3, ?4, ?5)
+            "INSERT INTO channels (name, secret, hash, kind, added_at, position)
+             VALUES (?1, ?2, ?3, ?4, ?5, (SELECT coalesce(max(position), 0) + 1 FROM channels))
              ON CONFLICT (secret) DO NOTHING",
             params![name, key.secret(), key.hash(), kind.as_str(), added_at],
         )? > 0;
@@ -194,6 +195,40 @@ impl Store {
             self.load_keys()?;
         }
         Ok(added)
+    }
+
+    /// Puts the channels named first in lists, in the order given; the rest
+    /// follow in the order they were in. Names that match no channel are
+    /// ignored, and where two channels share a name, each mention takes the
+    /// next of them.
+    pub fn order_channels(&mut self, names: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        let mut current: Vec<(i64, String)> = tx
+            .prepare("SELECT id, name FROM channels ORDER BY position, id")?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut ordered = Vec::with_capacity(current.len());
+        for name in names {
+            if let Some(at) = current.iter().position(|(_, have)| have == name) {
+                ordered.push(current.remove(at).0);
+            }
+        }
+        ordered.extend(current.into_iter().map(|(id, _)| id));
+        {
+            let mut update = tx.prepare("UPDATE channels SET position = ?1 WHERE id = ?2")?;
+            for (position, id) in ordered.iter().enumerate() {
+                update.execute(params![position as i64 + 1, id])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Channel names in list order.
+    pub fn channel_order(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT name FROM channels ORDER BY position, id")?;
+        let names = stmt.query_map([], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(names)
     }
 
     pub fn channels(&self) -> Result<Vec<ChannelRow>> {

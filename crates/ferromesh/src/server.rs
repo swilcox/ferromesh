@@ -60,7 +60,27 @@ impl Server {
         body: &B,
         token: Option<&str>,
     ) -> Result<T> {
-        let mut request = reqwest::Client::new().post(format!("{}{path}", self.base)).json(body);
+        self.send(reqwest::Method::POST, path, body, token).await
+    }
+
+    pub async fn put<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+        token: Option<&str>,
+    ) -> Result<T> {
+        self.send(reqwest::Method::PUT, path, body, token).await
+    }
+
+    async fn send<B: Serialize, T: DeserializeOwned>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: &B,
+        token: Option<&str>,
+    ) -> Result<T> {
+        let url = format!("{}{path}", self.base);
+        let mut request = reqwest::Client::new().request(method, url).json(body);
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }

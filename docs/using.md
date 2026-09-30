@@ -129,7 +129,7 @@ Hashtag channels derive their key from the name, which is why guessing works; pr
 ferromesh tui
 ```
 
-Eight views, switched with `1` to `8`:
+Nine views, switched with `1` to `9`:
 
 | | |
 |---|---|
@@ -141,17 +141,21 @@ Eight views, switched with `1` to `8`:
 | **6 Alerts** | Your watches, and new traffic that matched them |
 | **7 Health** | Each observer's battery, noise floor, traffic and delivery, with trends and warnings |
 | **8 Contacts** | The companion radio's own contact list, favourites first, marking the one it would replace next |
+| **9 Channels** | The channels the server decrypts, and below them the channel hashes on stored traffic that no known key opens, with any names a guess found |
 
 Keys:
 
 - `c` composes: a message to the selected channel, a reply in the conversation the DM view is showing, or a message to the selected contact (needs the token).
-- `Tab` moves between the channel list and the feed, or the people list and the conversation in DMs.
+- `Tab` moves between the channel list and the feed, the people list and the conversation in DMs, or the channels and the undecrypted traffic in Channels.
 - `p` keeps a contact on the radio, or lets it go again; in the Nodes view it adds the selected node as a kept contact (needs the token).
 - `n` in the DM view starts a conversation with anyone, by name or the start of their key; `m` in the Nodes, Contacts or Messages view does the same for whoever is selected — in Messages, that's the sender of the selected message.
 - `r` replies to the selected channel message, on the channel it arrived on and naming its sender.
 - `a` advertises the radio: `l` to its neighbours, `f` across the mesh (needs the token).
-- `a` advertises the radio, then `l` for its neighbours or `f` for the whole mesh (needs the token).
-- `Enter` opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field.
+- `+` adds a channel, in the Messages or Channels view: `#name` for a hashtag channel, or a name followed by its key in hex or base64. Stored traffic it opens is decrypted too (needs the token).
+- `J` and `K` move the selected channel down and up, and `T` sends it to the top, in the Channels view or the Messages view's channel list. The order is kept on the server, so every client sees it (needs the token).
+- `o` in the Messages or Channels view sorts the channel lists: your order, most messages, or most recent message. Channels move only in your order.
+- `s` in the Channels view guesses names for undecrypted traffic: any you type, common ones, and hashtags mentioned in messages. Hashes a name opens move to the top of the list, and `+` on one offers that name.
+- `Enter` in the Channels view reads the selected channel in Messages; elsewhere it opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field.
 - `/` filters the current view, with the filter language above.
 - `w` saves the current filter as a watch. Matching traffic is highlighted, and new matches ring the bell and land in Alerts.
 - Scrolling past the oldest row loads older history from the server.

@@ -5,14 +5,15 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ferromesh_model::{
-    ChannelInfo, DirectMessageInfo, Event, Filter, FilterError, Kind, NodeInfo, ObserverHealth,
-    PacketDetail, RadioContact, SendStatus, SentMessageInfo,
+    AddChannel, ChannelInfo, DirectMessageInfo, Event, Filter, FilterError, Guess, GuessReport,
+    Kind, NodeInfo, ObserverHealth, PacketDetail, RadioContact, SendStatus, SentMessageInfo,
+    UnknownChannel,
 };
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
 
 use meshcore_proto::companion::txt_type;
-use meshcore_proto::mention;
+use meshcore_proto::{ChannelKey, mention};
 
 use super::emoji::{self, Suggestion};
 use crate::config::WatchConfig;
@@ -37,10 +38,12 @@ pub enum View {
     Health,
     /// The companion radio's own contact list.
     Contacts,
+    /// The channels the server decrypts, and traffic no key opens yet.
+    Channels,
 }
 
 impl View {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Messages,
         Self::Dms,
         Self::Packets,
@@ -49,6 +52,7 @@ impl View {
         Self::Alerts,
         Self::Health,
         Self::Contacts,
+        Self::Channels,
     ];
 
     pub const fn title(self) -> &'static str {
@@ -61,6 +65,7 @@ impl View {
             Self::Alerts => "Alerts",
             Self::Health => "Health",
             Self::Contacts => "Contacts",
+            Self::Channels => "Channels",
         }
     }
 
@@ -70,7 +75,12 @@ impl View {
             Self::Messages => Some(Kind::Messages),
             Self::Packets => Some(Kind::Packets),
             Self::Rf => Some(Kind::Observations),
-            Self::Dms | Self::Nodes | Self::Alerts | Self::Health | Self::Contacts => None,
+            Self::Dms
+            | Self::Nodes
+            | Self::Alerts
+            | Self::Health
+            | Self::Contacts
+            | Self::Channels => None,
         }
     }
 }
@@ -183,6 +193,44 @@ impl Conversation {
     }
 }
 
+/// How channel lists are ordered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChannelSort {
+    /// The order kept on the server, which `J`, `K` and `T` change.
+    #[default]
+    Own,
+    /// Most messages first.
+    Messages,
+    /// Most recent message first.
+    Recent,
+}
+
+impl ChannelSort {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Own => "your order",
+            Self::Messages => "most messages",
+            Self::Recent => "most recent",
+        }
+    }
+
+    const fn next(self) -> Self {
+        match self {
+            Self::Own => Self::Messages,
+            Self::Messages => Self::Recent,
+            Self::Recent => Self::Own,
+        }
+    }
+}
+
+/// Where `J`, `K` and `T` move a channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Move {
+    Up,
+    Down,
+    Top,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prompt {
     Filter,
@@ -193,6 +241,10 @@ pub enum Prompt {
     Advert,
     /// Who to start a conversation with: a name or a key prefix.
     Recipient,
+    /// A channel for the server to decrypt: `#name`, or a name and its key.
+    AddChannel,
+    /// Hashtag names to try against traffic no key opens.
+    Guess,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -262,6 +314,15 @@ pub enum Command {
         to: String,
         pinned: bool,
     },
+    /// Have the server decrypt a channel, and its stored traffic.
+    AddChannel(AddChannel),
+    /// Fetch the channel hashes no known key opens.
+    LoadUndecrypted,
+    /// Try names against undecrypted traffic: these, the server's common
+    /// names, and hashtags mentioned in messages.
+    Guess(Vec<String>),
+    /// Keep the channels in this order on the server.
+    OrderChannels(Vec<String>),
 }
 
 /// News from the network side.
@@ -282,6 +343,10 @@ pub enum Update {
     Contacts(Result<Vec<RadioContact>, String>),
     /// A direct message went to this node, named as the server resolved it.
     Wrote(String),
+    /// Channel hashes no known key opens, or why they couldn't be fetched.
+    Undecrypted(Result<Vec<UnknownChannel>, String>),
+    /// Names that open undecrypted traffic, or why guessing failed.
+    Guessed(Result<GuessReport, String>),
     Detail(String, Result<PacketDetail, String>),
     Older {
         kind: Kind,
@@ -329,6 +394,21 @@ pub struct App {
     hop_names: HashMap<String, Option<String>>,
     /// The messages view's channel; `None` shows all of them.
     pub channel: Option<String>,
+    /// The channels view's selected channel, in [`App::ordered_channels`].
+    pub channel_selected: usize,
+    pub channel_sort: ChannelSort,
+    /// A new order was sent and the channel list hasn't come back since.
+    ordering: bool,
+    /// Channel hashes no known key opens, most packets first; `None` until
+    /// the channels view first asks.
+    pub undecrypted: Option<Result<Vec<UnknownChannel>, String>>,
+    pub undecrypted_selected: usize,
+    /// The channels view has the undecrypted list focused.
+    pub undecrypted_focus: bool,
+    loading_undecrypted: bool,
+    /// Names the last guess found, most packets first.
+    pub guesses: Vec<Guess>,
+    guessing: bool,
     pub sidebar_focus: bool,
     filters: HashMap<View, ViewFilter>,
     /// Per feed, the selected event's [`order`]; `None` follows the newest.
@@ -376,6 +456,15 @@ impl App {
             contact_selected: 0,
             hop_names: HashMap::new(),
             channel: None,
+            channel_selected: 0,
+            channel_sort: ChannelSort::Own,
+            ordering: false,
+            undecrypted: None,
+            undecrypted_selected: 0,
+            undecrypted_focus: false,
+            loading_undecrypted: false,
+            guesses: Vec::new(),
+            guessing: false,
             sidebar_focus: false,
             filters: HashMap::new(),
             cursors: [None; 3],
@@ -472,6 +561,9 @@ impl App {
         self.feeds.iter().all(|feed| {
             (feed.live || matches!(feed.connection, Connection::Lost(_))) && !feed.loading_older
         }) && self.inspector.as_ref().is_none_or(|inspector| inspector.detail.is_some())
+            && !self.loading_undecrypted
+            && !self.guessing
+            && !self.ordering
     }
 
     /// The events a list view shows, in [`order`]: a message decrypted late,
@@ -742,6 +834,133 @@ impl App {
         self.prompt(Prompt::Compose);
     }
 
+    /// Names the last guess found for a hash, leaving out channels added
+    /// since.
+    pub fn guesses_for(&self, hash: u8) -> Vec<&Guess> {
+        self.guesses
+            .iter()
+            .filter(|guess| guess.hash == hash)
+            .filter(|guess| !self.channels.iter().any(|channel| channel.name == guess.name))
+            .collect()
+    }
+
+    /// Undecrypted channel hashes, those a guess has named first, then by
+    /// packets as the server sends them.
+    pub fn undecrypted_list(&self) -> Vec<&UnknownChannel> {
+        let mut list: Vec<&UnknownChannel> = match &self.undecrypted {
+            Some(Ok(list)) => list.iter().collect(),
+            _ => Vec::new(),
+        };
+        list.sort_by_key(|unknown| self.guesses_for(unknown.hash).is_empty());
+        list
+    }
+
+    fn load_undecrypted(&mut self) -> Vec<Command> {
+        if self.loading_undecrypted {
+            return Vec::new();
+        }
+        self.loading_undecrypted = true;
+        vec![Command::LoadUndecrypted]
+    }
+
+    /// Channels as lists show them, in the chosen sort. Ties keep the
+    /// server's order.
+    pub fn ordered_channels(&self) -> Vec<&ChannelInfo> {
+        let mut channels: Vec<&ChannelInfo> = self.channels.iter().collect();
+        match self.channel_sort {
+            ChannelSort::Own => {}
+            ChannelSort::Messages => channels.sort_by_key(|channel| -channel.messages),
+            ChannelSort::Recent => {
+                let latest = self.latest_messages();
+                channels.sort_by_key(|channel| {
+                    let live = latest.get(channel.name.as_str()).copied();
+                    std::cmp::Reverse(channel.last_message_at.max(live))
+                });
+            }
+        }
+        channels
+    }
+
+    /// The newest message held per channel, which is fresher than the
+    /// channel list fetched once a minute.
+    fn latest_messages(&self) -> HashMap<&str, Timestamp> {
+        let mut latest: HashMap<&str, Timestamp> = HashMap::new();
+        for event in self.feeds[slot(Kind::Messages)].events.values() {
+            if let Event::Message(message) = event {
+                let at = latest.entry(message.channel.as_str()).or_insert(message.first_seen_at);
+                *at = (*at).max(message.first_seen_at);
+            }
+        }
+        latest
+    }
+
+    /// The channels view's selected channel.
+    fn channel_at_selection(&self) -> Option<String> {
+        let channels = self.ordered_channels();
+        channels.get(self.channel_selected).map(|channel| channel.name.clone())
+    }
+
+    /// Selects `name` in the channels view, wherever the sort has put it.
+    fn select_channel_row(&mut self, name: Option<String>) {
+        if let Some(name) = name
+            && let Some(at) = self.ordered_channels().iter().position(|c| c.name == name)
+        {
+            self.channel_selected = at;
+        }
+    }
+
+    fn cycle_channel_sort(&mut self) {
+        let selected = self.channel_at_selection();
+        self.channel_sort = self.channel_sort.next();
+        self.select_channel_row(selected);
+        self.status = Some(format!("channels by {}", self.channel_sort.label()));
+    }
+
+    /// Moves the selected channel (the sidebar's in the messages view) in
+    /// your own order, and has the server keep it.
+    fn move_channel(&mut self, how: Move) -> Vec<Command> {
+        let name = match self.view {
+            View::Channels if !self.undecrypted_focus => self.channel_at_selection(),
+            View::Messages if self.sidebar_focus => self.channel.clone(),
+            _ => return Vec::new(),
+        };
+        let Some(name) = name else {
+            return Vec::new();
+        };
+        if self.channel_sort != ChannelSort::Own {
+            self.status = Some(format!(
+                "channels are by {}; o switches to your order to move them",
+                self.channel_sort.label()
+            ));
+            return Vec::new();
+        }
+        let Some(from) = self.channels.iter().position(|channel| channel.name == name) else {
+            return Vec::new();
+        };
+        let to = match how {
+            Move::Up => from.saturating_sub(1),
+            Move::Down => (from + 1).min(self.channels.len() - 1),
+            Move::Top => 0,
+        };
+        if to == from {
+            return Vec::new();
+        }
+        let channel = self.channels.remove(from);
+        self.channels.insert(to, channel);
+        self.channel_selected = to;
+        let names = self.channels.iter().map(|channel| channel.name.clone()).collect();
+        self.ordering = true;
+        vec![Command::OrderChannels(names)]
+    }
+
+    /// Opens the selected channel in the messages view.
+    fn open_selected_channel(&mut self) {
+        if let Some(name) = self.channel_at_selection() {
+            self.show(View::Messages);
+            self.select_channel(Some(name));
+        }
+    }
+
     pub fn apply(&mut self, update: Update) {
         match update {
             Update::Event(event) => self.receive(event, true),
@@ -764,12 +983,44 @@ impl App {
                 }
             }
             Update::Lost(kind, reason) => self.feed_mut(kind).connection = Connection::Lost(reason),
-            Update::Channels(channels) => self.channels = channels,
+            Update::Channels(channels) => {
+                self.ordering = false;
+                let selected = self.channel_at_selection();
+                self.channels = channels;
+                self.channel_selected =
+                    self.channel_selected.min(self.channels.len().saturating_sub(1));
+                self.select_channel_row(selected);
+            }
             Update::Health(health) => self.health = health,
             Update::Dms(dms) => self.dms = dms,
             Update::SentDms(sent) => self.sent_dms = sent,
             Update::Contacts(contacts) => self.contacts = contacts,
             Update::Wrote(who) => self.correspondent = Some(who),
+            Update::Undecrypted(result) => {
+                self.loading_undecrypted = false;
+                if let Ok(list) = &result {
+                    self.undecrypted_selected =
+                        self.undecrypted_selected.min(list.len().saturating_sub(1));
+                }
+                self.undecrypted = Some(result);
+            }
+            Update::Guessed(result) => {
+                self.guessing = false;
+                match result {
+                    Ok(report) => {
+                        let hits = report.hits.len();
+                        self.status = Some(match hits {
+                            0 => format!("tried {} names; none opens stored traffic", report.tried),
+                            _ => format!(
+                                "tried {} names; {hits} open stored traffic, shown under guess",
+                                report.tried
+                            ),
+                        });
+                        self.guesses = report.hits;
+                    }
+                    Err(error) => self.status = Some(format!("couldn't guess: {error}")),
+                }
+            }
             Update::Nodes(nodes) => {
                 self.hop_names.clear();
                 for node in &nodes {
@@ -919,8 +1170,12 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char(digit @ '1'..='8') => {
-                self.show(View::ALL[usize::from(digit as u8 - b'1')])
+            KeyCode::Char(digit @ '1'..='9') => {
+                let view = View::ALL[usize::from(digit as u8 - b'1')];
+                self.show(view);
+                if view == View::Channels {
+                    return self.load_undecrypted();
+                }
             }
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('/') => self.prompt(Prompt::Filter),
@@ -933,6 +1188,7 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => match self.view {
                 View::Messages | View::Dms => self.sidebar_focus = !self.sidebar_focus,
                 View::Alerts => self.watch_focus = !self.watch_focus,
+                View::Channels => self.undecrypted_focus = !self.undecrypted_focus,
                 _ => {}
             },
             KeyCode::Esc => {
@@ -948,7 +1204,22 @@ impl App {
             KeyCode::PageUp => return self.move_by(-PAGE),
             KeyCode::Home | KeyCode::Char('g') => return self.move_by(isize::MIN / 2),
             KeyCode::End | KeyCode::Char('G') => self.follow(),
+            KeyCode::Enter if self.view == View::Channels => {
+                if !self.undecrypted_focus {
+                    self.open_selected_channel();
+                }
+            }
             KeyCode::Enter => return self.inspect_selected(),
+            KeyCode::Char('+') if matches!(self.view, View::Messages | View::Channels) => {
+                self.prompt(Prompt::AddChannel);
+            }
+            KeyCode::Char('s') if self.view == View::Channels => self.prompt(Prompt::Guess),
+            KeyCode::Char('o') if matches!(self.view, View::Messages | View::Channels) => {
+                self.cycle_channel_sort();
+            }
+            KeyCode::Char('K') => return self.move_channel(Move::Up),
+            KeyCode::Char('J') => return self.move_channel(Move::Down),
+            KeyCode::Char('T') => return self.move_channel(Move::Top),
             KeyCode::Char('d') if self.view == View::Alerts && self.watch_focus => {
                 return self.delete_watch();
             }
@@ -994,6 +1265,10 @@ impl App {
                     self.contact_selected = self.visible_contacts().len().saturating_sub(1);
                 }
                 View::Nodes => self.node_selected = self.visible_nodes().len().saturating_sub(1),
+                View::Channels if self.undecrypted_focus => {
+                    self.undecrypted_selected = self.undecrypted_list().len().saturating_sub(1);
+                }
+                View::Channels => self.channel_selected = self.channels.len().saturating_sub(1),
                 _ => {
                     self.node_selected = 0;
                     self.alert_selected = 0;
@@ -1036,6 +1311,16 @@ impl App {
             View::Nodes => {
                 let last = self.visible_nodes().len().saturating_sub(1);
                 self.node_selected = step(self.node_selected, delta, last);
+                Vec::new()
+            }
+            View::Channels if self.undecrypted_focus => {
+                let last = self.undecrypted_list().len().saturating_sub(1);
+                self.undecrypted_selected = step(self.undecrypted_selected, delta, last);
+                Vec::new()
+            }
+            View::Channels => {
+                let last = self.channels.len().saturating_sub(1);
+                self.channel_selected = step(self.channel_selected, delta, last);
                 Vec::new()
             }
             View::Alerts if self.watch_focus => {
@@ -1081,7 +1366,7 @@ impl App {
 
     fn move_sidebar(&mut self, delta: isize) {
         let names: Vec<Option<String>> = std::iter::once(None)
-            .chain(self.channels.iter().map(|channel| Some(channel.name.clone())))
+            .chain(self.ordered_channels().iter().map(|channel| Some(channel.name.clone())))
             .collect();
         let current = names.iter().position(|name| *name == self.channel).unwrap_or(0);
         let target = step(current, delta, names.len() - 1);
@@ -1116,7 +1401,7 @@ impl App {
 
     fn inspect_selected(&mut self) -> Vec<Command> {
         let hash = match self.view {
-            View::Nodes => None,
+            View::Nodes | View::Channels => None,
             View::Alerts => {
                 self.alerts.iter().rev().nth(self.alert_selected).map(|a| hash_of(&a.event))
             }
@@ -1134,12 +1419,17 @@ impl App {
 
     fn prompt(&mut self, prompt: Prompt) {
         if prompt == Prompt::Watch
-            && matches!(self.view, View::Dms | View::Nodes | View::Health | View::Contacts)
+            && matches!(
+                self.view,
+                View::Dms | View::Nodes | View::Health | View::Contacts | View::Channels
+            )
         {
             self.status = Some("watches apply to messages, packets and RF".into());
             return;
         }
-        if prompt == Prompt::Filter && matches!(self.view, View::Dms | View::Health) {
+        if prompt == Prompt::Filter
+            && matches!(self.view, View::Dms | View::Health | View::Channels)
+        {
             self.status = Some("there's nothing to filter here".into());
             return;
         }
@@ -1147,8 +1437,21 @@ impl App {
             self.input = Some(Input::new(prompt, String::new()));
             return;
         }
-        if prompt == Prompt::Advert {
+        if prompt == Prompt::Advert || prompt == Prompt::Guess {
             self.input = Some(Input::new(prompt, String::new()));
+            return;
+        }
+        if prompt == Prompt::AddChannel {
+            // A name the last guess found for the selected hash, ready to add.
+            let guessed = match (self.view, self.undecrypted_focus) {
+                (View::Channels, true) => self
+                    .undecrypted_list()
+                    .get(self.undecrypted_selected)
+                    .and_then(|unknown| self.guesses_for(unknown.hash).first().copied())
+                    .map(|guess| guess.name.clone()),
+                _ => None,
+            };
+            self.input = Some(Input::new(prompt, guessed.unwrap_or_default()));
             return;
         }
         if prompt == Prompt::Compose {
@@ -1267,6 +1570,29 @@ impl App {
                 }
                 Vec::new()
             }
+            Prompt::AddChannel => match parse_channel(&text) {
+                Ok(request) => {
+                    self.status = Some(format!("adding {}…", request.name));
+                    vec![Command::AddChannel(request)]
+                }
+                Err(error) => {
+                    self.input = Some(Input { error: Some(error), ..input });
+                    Vec::new()
+                }
+            },
+            Prompt::Guess => {
+                let names: Vec<String> = text
+                    .split(|c: char| c.is_whitespace() || c == ',')
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                self.guessing = true;
+                self.status = Some(match names.len() {
+                    0 => "trying common names and hashtags seen in messages…".to_owned(),
+                    n => format!("trying {n} names, common ones and hashtags seen in messages…"),
+                });
+                vec![Command::Guess(names)]
+            }
             Prompt::Compose => {
                 let Some(to) = composed_to.or_else(|| self.compose_target()) else {
                     return Vec::new();
@@ -1351,6 +1677,26 @@ impl App {
     fn save_watches(&self) -> Command {
         Command::SaveWatches(self.watches.iter().map(|watch| watch.config.clone()).collect())
     }
+}
+
+/// What the add-channel prompt asks for: `#name` for a hashtag channel, or a
+/// name followed by its key in hex or base64. The key is checked here and
+/// sent as base64, which every server version accepts.
+fn parse_channel(text: &str) -> Result<AddChannel, String> {
+    if text.is_empty() {
+        return Err("a channel needs a name".into());
+    }
+    if text.starts_with('#') {
+        if text.contains(char::is_whitespace) {
+            return Err("a hashtag channel is just its name, with no spaces".into());
+        }
+        return Ok(AddChannel { name: text.to_owned(), key: None });
+    }
+    let Some((name, key)) = text.rsplit_once(char::is_whitespace) else {
+        return Err("hashtags start with #; a private channel needs its key after the name".into());
+    };
+    let key = ChannelKey::parse(key).map_err(|error| format!("that key won't do: {error}"))?;
+    Ok(AddChannel { name: name.trim_end().to_owned(), key: Some(key.to_base64()) })
 }
 
 fn parse_for(text: &str, kind: Kind) -> Result<Filter, FilterError> {
@@ -1745,5 +2091,189 @@ mod tests {
         let mut app = with_history(Vec::new());
         app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)));
         assert!(app.quit);
+    }
+
+    #[test]
+    fn channels_parse_as_hashtags_or_with_a_key() {
+        assert_eq!(parse_channel("#wx"), Ok(AddChannel { name: "#wx".into(), key: None }));
+        let hex = "0123456789abcdef0123456789abcdef";
+        let added = parse_channel(&format!("My Group {hex}")).unwrap();
+        assert_eq!(added.name, "My Group");
+        assert_eq!(added.key, Some(ChannelKey::parse(hex).unwrap().to_base64()));
+        assert!(parse_channel("").is_err());
+        assert!(parse_channel("#two words").is_err());
+        assert!(parse_channel("wx").is_err(), "a bare name is neither");
+        assert!(parse_channel("My Group nothex").is_err());
+    }
+
+    #[test]
+    fn adding_a_channel() {
+        let mut app = with_history(Vec::new());
+        assert_eq!(press(&mut app, KeyCode::Char('9')), [Command::LoadUndecrypted]);
+        assert!(!app.idle(), "waits for the undecrypted list");
+        // Coming back while it loads doesn't ask again.
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(press(&mut app, KeyCode::Char('9')), []);
+
+        press(&mut app, KeyCode::Char('+'));
+        type_text(&mut app, "wx");
+        assert_eq!(press(&mut app, KeyCode::Enter), []);
+        assert!(app.input.as_ref().is_some_and(|input| input.error.is_some()));
+        for _ in 0..2 {
+            press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "#wx");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            [Command::AddChannel(AddChannel { name: "#wx".into(), key: None })]
+        );
+        assert!(app.input.is_none());
+    }
+
+    #[test]
+    fn guessing_names_for_undecrypted_traffic() {
+        let mut app = with_history(Vec::new());
+        press(&mut app, KeyCode::Char('9'));
+        let unknown = |hash: u8, packets: i64| UnknownChannel {
+            hash,
+            packets,
+            heard: packets,
+            text_packets: packets,
+            data_packets: 0,
+            first_seen_at: Timestamp::UNIX_EPOCH,
+            last_seen_at: Timestamp::UNIX_EPOCH,
+            shares_hash_with: None,
+        };
+        app.apply(Update::Undecrypted(Ok(vec![unknown(0x81, 651), unknown(0x12, 3)])));
+
+        press(&mut app, KeyCode::Char('s'));
+        type_text(&mut app, "#chattanooga, wardriving");
+        assert_eq!(
+            press(&mut app, KeyCode::Enter),
+            [Command::Guess(vec!["#chattanooga".into(), "wardriving".into()])]
+        );
+        assert!(!app.idle());
+        let hit = Guess { name: "#wardriving".into(), hash: 0x12, packets: 3, messages: 2 };
+        app.apply(Update::Guessed(Ok(GuessReport { tried: 90, hits: vec![hit] })));
+        assert!(app.idle());
+
+        // The guessed hash comes first, and + on it offers its name; on
+        // another, a blank line.
+        assert_eq!(app.undecrypted_list()[0].hash, 0x12);
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.input.as_ref().map(|input| input.text.as_str()), Some("#wardriving"));
+        press(&mut app, KeyCode::Esc);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('+'));
+        assert_eq!(app.input.as_ref().map(|input| input.text.as_str()), Some(""));
+        press(&mut app, KeyCode::Esc);
+
+        // Once added, the guess is no longer offered.
+        app.apply(Update::Channels(vec![ChannelInfo {
+            name: "#wardriving".into(),
+            kind: "hashtag".into(),
+            hash: 0x12,
+            enabled: true,
+            added_at: Timestamp::UNIX_EPOCH,
+            messages: 2,
+            last_message_at: None,
+        }]));
+        assert!(app.guesses_for(0x12).is_empty());
+        assert_eq!(app.undecrypted_list()[0].hash, 0x81);
+
+        // Enter on a channel reads it.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.view, View::Messages);
+        assert_eq!(app.channel.as_deref(), Some("#wardriving"));
+    }
+
+    fn channel(name: &str, messages: i64, last: Option<i64>) -> ChannelInfo {
+        ChannelInfo {
+            name: name.into(),
+            kind: "hashtag".into(),
+            hash: 0,
+            enabled: true,
+            added_at: Timestamp::UNIX_EPOCH,
+            messages,
+            last_message_at: last.map(|second| Timestamp::from_second(second).unwrap()),
+        }
+    }
+
+    fn channel_names(app: &App) -> Vec<&str> {
+        app.ordered_channels().iter().map(|channel| channel.name.as_str()).collect()
+    }
+
+    #[test]
+    fn moving_channels() {
+        let mut app = with_history(Vec::new());
+        app.apply(Update::Channels(vec![
+            channel("public", 5, Some(10)),
+            channel("#a", 1, Some(30)),
+            channel("#b", 9, Some(20)),
+        ]));
+        press(&mut app, KeyCode::Char('9'));
+        press(&mut app, KeyCode::Down);
+        let order = |names: &[&str]| {
+            vec![Command::OrderChannels(names.iter().map(|name| name.to_string()).collect())]
+        };
+        assert_eq!(press(&mut app, KeyCode::Char('J')), order(&["public", "#b", "#a"]));
+        assert_eq!(press(&mut app, KeyCode::Char('J')), [], "already last");
+        assert_eq!(press(&mut app, KeyCode::Char('K')), order(&["public", "#a", "#b"]));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(press(&mut app, KeyCode::Char('T')), order(&["#b", "public", "#a"]));
+        assert_eq!(app.channel_selected, 0, "the selection moves with it");
+
+        // The server's reply, in the same order, keeps the selection.
+        app.apply(Update::Channels(vec![
+            channel("#b", 9, Some(20)),
+            channel("public", 5, Some(10)),
+            channel("#a", 1, Some(30)),
+        ]));
+        assert_eq!(app.channel_at_selection().as_deref(), Some("#b"));
+
+        // From the messages view's sidebar, the channel it shows moves.
+        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.channel.as_deref(), Some("public"));
+        assert_eq!(press(&mut app, KeyCode::Char('T')), order(&["public", "#b", "#a"]));
+    }
+
+    #[test]
+    fn sorting_channels() {
+        let mut app = with_history(Vec::new());
+        app.apply(Update::Channels(vec![
+            channel("public", 5, Some(10)),
+            channel("#a", 1, Some(30)),
+            channel("#b", 9, Some(20)),
+            channel("#quiet", 0, None),
+        ]));
+        press(&mut app, KeyCode::Char('9'));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(channel_names(&app), ["public", "#a", "#b", "#quiet"]);
+
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.channel_sort, ChannelSort::Messages);
+        assert_eq!(channel_names(&app), ["#b", "public", "#a", "#quiet"]);
+        assert_eq!(app.channel_at_selection().as_deref(), Some("#a"), "selection follows");
+        // Only your own order can be changed.
+        assert_eq!(press(&mut app, KeyCode::Char('K')), []);
+        assert!(app.status.as_deref().is_some_and(|status| status.contains("o switches")));
+
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(channel_names(&app), ["#a", "#b", "public", "#quiet"]);
+        // A message held in the feed counts before the channel list catches up.
+        let mut newest = message(7, "public", "just now");
+        if let Event::Message(message) = &mut newest {
+            message.first_seen_at = Timestamp::from_second(40).unwrap();
+        }
+        app.apply(Update::Event(newest));
+        assert_eq!(channel_names(&app), ["public", "#a", "#b", "#quiet"]);
+
+        press(&mut app, KeyCode::Char('o'));
+        assert_eq!(app.channel_sort, ChannelSort::Own);
     }
 }

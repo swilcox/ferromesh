@@ -255,7 +255,7 @@ pub(crate) fn channel_infos(conn: &Connection, id: Option<i64>) -> Result<Vec<Ch
          LEFT JOIN messages m ON m.channel_id = c.id
          WHERE ?1 IS NULL OR c.id = ?1
          GROUP BY c.id
-         ORDER BY c.id",
+         ORDER BY c.position, c.id",
     )?;
     let channels = stmt
         .query_map([id], |row| {

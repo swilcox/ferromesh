@@ -178,8 +178,8 @@ fn row(label: &str, mut value: Vec<Span<'static>>) -> Line<'static> {
 }
 
 const HELP: &[(&str, &str)] = &[
-    ("1-8", "messages, DMs, packets, RF, nodes, alerts, health, contacts"),
-    ("Tab", "channels (messages), people (DMs), watches (alerts)"),
+    ("1-9", "switch view, as numbered along the top"),
+    ("Tab", "channels, people, watches, or undecrypted traffic"),
     ("j k ↑ ↓", "move; PgUp PgDn by a page"),
     ("g Home", "oldest loaded; again to load older"),
     ("G End", "back to following the newest"),
@@ -191,6 +191,10 @@ const HELP: &[(&str, &str)] = &[
     ("p", "keep a contact, or a node, on the radio"),
     ("n m", "write to someone: by name (DMs), or selected"),
     ("r", "reply on the channel, naming the sender"),
+    ("+", "add a channel: #name, or a name and its key"),
+    ("s", "guess names for undecrypted traffic (channels)"),
+    ("J K T", "move a channel down, up, or to the top"),
+    ("o", "sort channels: yours, most messages, most recent"),
     (":tada", "in a message: pick an emoji with Tab, ↑ ↓"),
     ("d", "delete the selected watch"),
     ("c", "clear alerts"),

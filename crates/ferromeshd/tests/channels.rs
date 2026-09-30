@@ -200,3 +200,39 @@ async fn without_a_token_changes_are_refused() {
     assert_eq!(status, 403, "{body}");
     assert!(body.contains("api.token"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reorder_channels() {
+    let server = Server::start(Some(TOKEN)).await;
+    let add = r##"{"name": "#wx"}"##;
+    let (status, body) = server.request("POST", "/api/v1/channels", Some(TOKEN), add).await;
+    assert_eq!(status, 201, "{body}");
+    let names = |channels: &[ChannelInfo]| -> Vec<String> {
+        channels.iter().map(|channel| channel.name.clone()).collect()
+    };
+    let channels: Vec<ChannelInfo> = server.get("/api/v1/channels").await;
+    assert_eq!(names(&channels), ["public", "#test", "#wx"], "the order added");
+
+    let order = r##"{"names": ["#wx", "#test"]}"##;
+    let (status, _) = server.request("PUT", "/api/v1/channels/order", None, order).await;
+    assert_eq!(status, 401);
+    let unknown = r##"{"names": ["#nope"]}"##;
+    let (status, body) =
+        server.request("PUT", "/api/v1/channels/order", Some(TOKEN), unknown).await;
+    assert_eq!(status, 400, "{body}");
+
+    // Those named come first; the rest keep their order after them.
+    let (status, body) = server.request("PUT", "/api/v1/channels/order", Some(TOKEN), order).await;
+    assert_eq!(status, 200, "{body}");
+    let reply: Vec<ChannelInfo> = serde_json::from_str(&body).unwrap();
+    assert_eq!(names(&reply), ["#wx", "#test", "public"]);
+    let channels: Vec<ChannelInfo> = server.get("/api/v1/channels").await;
+    assert_eq!(names(&channels), ["#wx", "#test", "public"]);
+
+    // A channel added later goes to the end.
+    let add = r##"{"name": "#bot"}"##;
+    let (status, body) = server.request("POST", "/api/v1/channels", Some(TOKEN), add).await;
+    assert_eq!(status, 201, "{body}");
+    let channels: Vec<ChannelInfo> = server.get("/api/v1/channels").await;
+    assert_eq!(names(&channels), ["#wx", "#test", "public", "#bot"]);
+}

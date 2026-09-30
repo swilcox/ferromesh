@@ -132,3 +132,20 @@ fn backfill_spans_batches() {
         Backfill { checked: 1_205, decrypted: 1_205, messages: 1_205 }
     );
 }
+
+#[test]
+fn channel_order_survives_decryption_order() {
+    let mut store = Store::open_in_memory().unwrap();
+    for name in ["#a", "#b"] {
+        store.add_channel(name, &ChannelKey::from_hashtag(name), ChannelKind::Hashtag, 0).unwrap();
+    }
+    assert_eq!(store.channel_order().unwrap(), ["public", "#a", "#b"]);
+    store.order_channels(&["#b".into(), "#missing".into(), "public".into()]).unwrap();
+    assert_eq!(store.channel_order().unwrap(), ["#b", "public", "#a"]);
+    let listed: Vec<String> =
+        store.channel_infos().unwrap().into_iter().map(|channel| channel.name).collect();
+    assert_eq!(listed, ["#b", "public", "#a"]);
+    // Keys are still tried in the order they were added.
+    let ids: Vec<i64> = store.channels().unwrap().iter().map(|channel| channel.id).collect();
+    assert!(ids.is_sorted());
+}

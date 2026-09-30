@@ -42,13 +42,16 @@ A WebSocket. It sends history first — `last` events, or everything after an id
 ## Channels
 
 ```
-GET  /api/v1/channels             # what the server decrypts
+GET  /api/v1/channels             # what the server decrypts, in list order
 GET  /api/v1/channels/unknown     # channel hashes on traffic no known key opens
 POST /api/v1/channels/guess       # {"names": [...], "builtin": true, "mentions": true}
 POST /api/v1/channels             # {"name": "#wx"} or {"name": "...", "key": "..."}   (token)
+PUT  /api/v1/channels/order       # {"names": ["#test", "public", ...]}   (token)
 ```
 
-Adding a channel backfills: stored traffic that was waiting for the key is decoded and appears in history.
+Adding a channel backfills: stored traffic that was waiting for the key is decoded and appears in history. A new channel goes to the end of the list.
+
+Setting the order puts the channels named first, in that order; any left out keep their order after them. The reply is the channel list in its new order. The order is only for display (decryption tries keys in the order they were added), and `rebuild` keeps it.
 
 ## Messaging
 

@@ -12,7 +12,7 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::app::{App, Connection, Conversation, DmLine, Input, Prompt, View};
+use super::app::{App, ChannelSort, Connection, Conversation, DmLine, Input, Prompt, View};
 use super::{emoji, lists, overlay};
 use crate::render::name_hash;
 
@@ -36,6 +36,8 @@ pub struct Screen {
     pub channels: usize,
     pub correspondents: usize,
     pub contacts: usize,
+    pub channel_list: usize,
+    pub undecrypted: usize,
     pub messages: usize,
     pub packets: usize,
     pub rf: usize,
@@ -57,6 +59,7 @@ pub fn draw(frame: &mut Frame, app: &App, screen: &mut Screen) {
         View::Alerts => lists::draw_alerts(frame, body, app, screen),
         View::Health => lists::draw_health(frame, body, app),
         View::Contacts => lists::draw_contacts(frame, body, app, screen),
+        View::Channels => lists::draw_channels(frame, body, app, screen),
     }
     draw_footer(frame, footer, app);
     if let Some(inspector) = &app.inspector {
@@ -134,10 +137,14 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
 
     // The tabs are navigation, so they keep their room: on a narrow screen
     // the status drops its labels and the server's address instead.
-    let tabs = Line::from(tabs);
+    let mut tabs = Line::from(tabs);
     let mut status = feeds_status(app, true);
     if tabs.width() + status.width() > usize::from(area.width) {
         status = feeds_status(app, false);
+    }
+    // Then the name goes, which every tab says anyway.
+    if tabs.width() + status.width() > usize::from(area.width) {
+        tabs.spans.drain(..2);
     }
 
     let [left, right] =
@@ -212,6 +219,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
             Prompt::Watch => "watch: ".to_owned(),
             Prompt::Compose => format!("message {}: ", app.compose_target().unwrap_or_default()),
             Prompt::Recipient => "write to (a name, or the start of a key): ".to_owned(),
+            Prompt::AddChannel => "add channel (#name, or a name and its key): ".to_owned(),
+            Prompt::Guess => "guess names (blank for common ones and hashtags seen): ".to_owned(),
             Prompt::Advert => {
                 "advertise the radio:  l  to the neighbours   f  across the mesh   Esc  cancel"
                     .to_owned()
@@ -252,7 +261,13 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (None, None) => {
             let hints = match app.view {
                 View::Messages => {
-                    "Tab channels  c compose  r reply  m write  / filter  Enter inspect  ? help"
+                    "Tab channels  c compose  r reply  m write  + add channel  / filter  ? help"
+                }
+                View::Channels if app.undecrypted_focus => {
+                    "Tab channels  s guess names  + add the guess  ? help  q quit"
+                }
+                View::Channels => {
+                    "Tab undecrypted  Enter read  J/K/T move  o sort  + add  s guess  ? help"
                 }
                 View::Packets | View::Rf => {
                     "/ filter  w watch  Enter inspect  g/G top/end  ? help  q quit"
@@ -364,13 +379,17 @@ pub(super) fn body_spans(body: &str) -> Vec<Span<'static>> {
 }
 
 fn draw_channels(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
-    let block = pane(Line::from("Channels"), app.sidebar_focus);
+    let title = match app.channel_sort {
+        ChannelSort::Own => Line::from("Channels"),
+        sort => Line::from(vec!["Channels ".into(), Span::raw(sort.label()).dim()]),
+    };
+    let block = pane(title, app.sidebar_focus);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let unread = app.unread();
     let names: Vec<Option<&str>> = std::iter::once(None)
-        .chain(app.channels.iter().map(|channel| Some(channel.name.as_str())))
+        .chain(app.ordered_channels().into_iter().map(|channel| Some(channel.name.as_str())))
         .collect();
     let selected = names.iter().position(|name| *name == app.channel.as_deref());
     let rows =
@@ -1042,6 +1061,40 @@ mod tests {
         }
 
         #[test]
+        fn channels() {
+            let mut app = app();
+            press(&mut app, KeyCode::Char('9'));
+            let lines = render(&app, 100, 14).join("\n");
+            assert!(lines.contains("loading…"), "{lines}");
+            let at = app.now;
+            app.apply(Update::Undecrypted(Ok(vec![ferromesh_model::UnknownChannel {
+                hash: 0x81,
+                packets: 651,
+                heard: 900,
+                text_packets: 600,
+                data_packets: 51,
+                first_seen_at: at,
+                last_seen_at: at,
+                shares_hash_with: None,
+            }])));
+            app.apply(Update::Guessed(Ok(ferromesh_model::GuessReport {
+                tried: 90,
+                hits: vec![ferromesh_model::Guess {
+                    name: "#wardriving".into(),
+                    hash: 0x81,
+                    packets: 651,
+                    messages: 40,
+                }],
+            })));
+            let lines = render(&app, 100, 14).join("\n");
+            for expected in ["Channels (1)", "#wx", "hashtag", "42", "Undecrypted (1)", "81", "651"]
+            {
+                assert!(lines.contains(expected), "{expected:?} missing from\n{lines}");
+            }
+            assert!(lines.contains("#wardriving (40 msgs)"), "{lines}");
+        }
+
+        #[test]
         fn replying_to_a_channel_message() {
             let mut app = app();
             let enter = |app: &mut App| {
@@ -1091,7 +1144,7 @@ mod tests {
         fn every_view_at_any_size() {
             for (width, height) in [(40, 10), (100, 30)] {
                 let mut app = app();
-                for key in ['1', '2', '3', '4', '5', '6', '7', '8'] {
+                for key in ['1', '2', '3', '4', '5', '6', '7', '8', '9'] {
                     press(&mut app, KeyCode::Char(key));
                     render(&app, width, height);
                     press(&mut app, KeyCode::Char('?'));

@@ -1,6 +1,7 @@
-//! The views besides messages: packets, RF, nodes, alerts and health.
+//! The views besides messages: packets, RF, nodes, alerts, health, contacts
+//! and channels.
 
-use ferromesh_model::{Event, Kind, ObservationEvent, ObserverState, PacketEvent};
+use ferromesh_model::{Event, Guess, Kind, ObservationEvent, ObserverState, PacketEvent};
 use jiff::Timestamp;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -509,4 +510,120 @@ fn summary(event: &Event) -> Vec<Span<'static>> {
             ]
         }
     }
+}
+
+/// The channels the server decrypts, above the channel hashes on stored
+/// traffic that no known key opens, with any names a guess found for them.
+pub fn draw_channels(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
+    let undecrypted = app.undecrypted_list();
+    let channels = app.ordered_channels();
+    // The known list takes the room it needs, up to half, leaving the rest
+    // to traffic still waiting for a key.
+    let wanted = (app.channels.len().max(1) as u16 + 3).min(area.height / 2);
+    let [top, bottom] =
+        Layout::vertical([Constraint::Length(wanted), Constraint::Fill(1)]).areas(area);
+
+    let title = format!("Channels ({}) · {}", channels.len(), app.channel_sort.label());
+    let block = pane(Line::from(title), !app.undecrypted_focus);
+    let inner = block.inner(top);
+    frame.render_widget(block, top);
+    if channels.is_empty() {
+        frame.render_widget(Paragraph::new("no channels yet; + adds one").dim(), inner);
+    } else {
+        let selected = Some(app.channel_selected.min(channels.len() - 1));
+        let height = usize::from(inner.height.saturating_sub(1));
+        let rows = ui::window(channels.len(), selected, height, &mut screen.channel_list, |_| 1);
+        let body: Vec<Row> = channels[rows.clone()]
+            .iter()
+            .map(|channel| {
+                let last = channel.last_message_at.map(|at| ui::ago(app, at)).unwrap_or_default();
+                Row::new(vec![
+                    Cell::from(Span::styled(channel.name.clone(), ui::name_color(&channel.name))),
+                    Cell::from(Span::raw(channel.kind.clone()).dim()),
+                    Cell::from(Span::raw(format!("{:02x}", channel.hash)).dim()),
+                    Cell::from(Line::from(channel.messages.to_string()).right_aligned()),
+                    Cell::from(Line::from(last).right_aligned()),
+                ])
+            })
+            .collect();
+        let widths = [
+            Constraint::Length(24),
+            Constraint::Length(8),
+            Constraint::Length(4),
+            Constraint::Length(8),
+            Constraint::Length(12),
+        ];
+        let header = header(&["name", "kind", "hash", "messages", "last message"]);
+        let mut state = TableState::default()
+            .with_selected(selected.filter(|_| !app.undecrypted_focus).map(|i| i - rows.start));
+        let table = Table::new(body, widths).header(header).row_highlight_style(ui::highlight());
+        frame.render_stateful_widget(table, inner, &mut state);
+    }
+
+    let block =
+        pane(Line::from(format!("Undecrypted ({})", undecrypted.len())), app.undecrypted_focus);
+    let inner = block.inner(bottom);
+    frame.render_widget(block, bottom);
+    let note = match &app.undecrypted {
+        None => Some(Span::raw("loading…").dim()),
+        Some(Err(error)) => {
+            Some(Span::raw(format!("couldn't load undecrypted traffic: {error}")).red())
+        }
+        Some(Ok(list)) if list.is_empty() => {
+            Some(Span::raw("every stored channel packet opens with a known key").dim())
+        }
+        Some(Ok(_)) => None,
+    };
+    if let Some(note) = note {
+        frame.render_widget(Paragraph::new(Line::from(note)).wrap(Wrap { trim: true }), inner);
+        return;
+    }
+    let selected = Some(app.undecrypted_selected.min(undecrypted.len() - 1));
+    let height = usize::from(inner.height.saturating_sub(1));
+    let rows = ui::window(undecrypted.len(), selected, height, &mut screen.undecrypted, |_| 1);
+    let body: Vec<Row> = undecrypted[rows.clone()]
+        .iter()
+        .map(|unknown| {
+            let guesses = app.guesses_for(unknown.hash);
+            let named = |guess: &Guess| {
+                let s = if guess.messages == 1 { "" } else { "s" };
+                format!("{} ({} msg{s})", guess.name, guess.messages)
+            };
+            let guess = match guesses.as_slice() {
+                [] => Span::raw(""),
+                [only] => Span::raw(named(only)).green(),
+                [first, rest @ ..] => {
+                    Span::raw(format!("{} +{}", named(first), rest.len())).green()
+                }
+            };
+            let shares = unknown
+                .shares_hash_with
+                .as_ref()
+                .map(|name| format!("same hash as {name}"))
+                .unwrap_or_default();
+            Row::new(vec![
+                Cell::from(Span::raw(format!("{:02x}", unknown.hash)).bold()),
+                Cell::from(Line::from(unknown.packets.to_string()).right_aligned()),
+                Cell::from(Line::from(unknown.heard.to_string()).right_aligned()),
+                Cell::from(Line::from(unknown.text_packets.to_string()).right_aligned()),
+                Cell::from(Line::from(ui::ago(app, unknown.last_seen_at)).right_aligned()),
+                Cell::from(guess),
+                Cell::from(Span::raw(shares).dark_gray()),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(4),
+        Constraint::Length(7),
+        Constraint::Length(6),
+        Constraint::Length(5),
+        Constraint::Length(5),
+        Constraint::Length(30),
+        Constraint::Fill(1),
+    ];
+    let header = header(&["hash", "packets", "heard", "text", "seen", "guess", ""]);
+    let mut state = TableState::default()
+        .with_selected(selected.filter(|_| app.undecrypted_focus).map(|i| i - rows.start));
+    let table = Table::new(body, widths).header(header).row_highlight_style(ui::highlight());
+    frame.render_stateful_widget(table, inner, &mut state);
 }

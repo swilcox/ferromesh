@@ -20,9 +20,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use ferromesh_model::{
-    AdvertRequest, AdvertSent, ChannelInfo, DirectMessageInfo, Event, HistoryQuery, Kind,
-    MAX_NODES, NodeInfo, ObserverHealth, PacketDetail, PinRequest, RadioContact, SendRequest,
-    SentMessageInfo,
+    AdvertRequest, AdvertSent, ChannelAdded, ChannelInfo, ChannelOrder, DirectMessageInfo, Event,
+    GuessChannels, GuessReport, HistoryQuery, Kind, MAX_NODES, NodeInfo, ObserverHealth,
+    PacketDetail, PinRequest, RadioContact, SendRequest, SentMessageInfo, UnknownChannel,
 };
 use futures_util::StreamExt;
 use jiff::Timestamp;
@@ -46,6 +46,8 @@ const REFRESH: Duration = Duration::from_secs(60);
 const DM_REFRESH: Duration = Duration::from_secs(10);
 /// Direct messages kept in the DM view, sent and received.
 const DM_HISTORY: usize = 500;
+/// How long quitting waits for a channel order still being sent.
+const ORDER_GRACE: Duration = Duration::from_secs(3);
 /// How long a snapshot waits for the server.
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -73,14 +75,19 @@ pub async fn run(server: Server, token: Option<String>, snapshot: Option<Snapsho
     for (kind, last) in HISTORY {
         streams.spawn(stream(server.clone(), kind, last, updates.clone()));
     }
+    let (order, orders) = mpsc::unbounded_channel();
+    let ordering = tokio::spawn(keep_order(server.clone(), token.clone(), orders, updates.clone()));
     let result = match snapshot {
         // A snapshot never writes the watch file.
         Some(snapshot) => {
-            let network = Network { server, updates, dir: None, token };
+            let network = Network { server, updates, dir: None, token, order };
             snap(app, &network, received, snapshot).await
         }
-        None => interactive(app, &Network { server, updates, dir, token }, received).await,
+        None => interactive(app, &Network { server, updates, dir, token, order }, received).await,
     };
+    // The network is gone, so the last order is on its way: give it time to
+    // arrive, so moving a channel just before quitting isn't lost.
+    let _ = tokio::time::timeout(ORDER_GRACE, ordering).await;
     streams.abort_all();
     result
 }
@@ -228,6 +235,8 @@ struct Network {
     /// Where watches are saved, if anywhere.
     dir: Option<PathBuf>,
     token: Option<String>,
+    /// Channel orders for [`keep_order`] to send.
+    order: UnboundedSender<Vec<String>>,
 }
 
 impl Network {
@@ -301,6 +310,48 @@ impl Network {
                     let _ = updates.send(Update::Status(status));
                 });
             }
+            Command::AddChannel(request) => {
+                let token = self.token.clone();
+                tokio::spawn(async move {
+                    let name = request.name.clone();
+                    let result: Result<ChannelAdded> =
+                        server.post("/api/v1/channels", &request, token.as_deref()).await;
+                    let status = match result {
+                        Ok(added) => {
+                            let backfill = added.backfill;
+                            format!(
+                                "added {} (hash {:02x}): opened {} of {} waiting packets, {} messages",
+                                added.channel.name,
+                                added.channel.hash,
+                                backfill.decrypted,
+                                backfill.checked,
+                                backfill.messages
+                            )
+                        }
+                        Err(error) => format!("couldn't add {name}: {error:#}"),
+                    };
+                    let _ = updates.send(Update::Status(status));
+                    fetch_channels(&server, &updates).await;
+                    fetch_undecrypted(&server, &updates).await;
+                });
+            }
+            Command::LoadUndecrypted => {
+                tokio::spawn(async move { fetch_undecrypted(&server, &updates).await });
+            }
+            Command::Guess(names) => {
+                tokio::spawn(async move {
+                    let request = GuessChannels { names, ..GuessChannels::default() };
+                    // Guessing only reads, so it needs no token.
+                    let report = server
+                        .post::<_, GuessReport>("/api/v1/channels/guess", &request, None)
+                        .await
+                        .map_err(|error| format!("{error:#}"));
+                    let _ = updates.send(Update::Guessed(report));
+                });
+            }
+            Command::OrderChannels(names) => {
+                let _ = self.order.send(names);
+            }
             Command::Send { to, text } => {
                 let token = self.token.clone();
                 tokio::spawn(async move {
@@ -339,11 +390,7 @@ impl Network {
 }
 
 async fn fetch_lists(server: &Server, updates: &UnboundedSender<Update>) {
-    let update = match server.get::<Vec<ChannelInfo>>("/api/v1/channels").await {
-        Ok(channels) => Update::Channels(channels),
-        Err(error) => Update::Status(format!("couldn't load channels: {error:#}")),
-    };
-    let _ = updates.send(update);
+    fetch_channels(server, updates).await;
     let update =
         match server.get::<Vec<NodeInfo>>(&format!("/api/v1/nodes?limit={MAX_NODES}")).await {
             Ok(nodes) => Update::Nodes(nodes),
@@ -357,6 +404,53 @@ async fn fetch_lists(server: &Server, updates: &UnboundedSender<Update>) {
     let _ = updates.send(Update::Health(health));
     fetch_dms(server, updates).await;
     fetch_contacts(server, updates).await;
+}
+
+/// Sends channel orders one at a time, so a quick run of moves can't arrive
+/// out of order, and skips any that a newer one replaces. Each is the whole
+/// order, so only the last matters.
+async fn keep_order(
+    server: Arc<Server>,
+    token: Option<String>,
+    mut orders: UnboundedReceiver<Vec<String>>,
+    updates: UnboundedSender<Update>,
+) {
+    while let Some(mut names) = orders.recv().await {
+        while let Ok(newer) = orders.try_recv() {
+            names = newer;
+        }
+        let request = ChannelOrder { names };
+        let result: Result<Vec<ChannelInfo>> =
+            server.put("/api/v1/channels/order", &request, token.as_deref()).await;
+        match result {
+            // A newer order is on its way, and this reply would undo it.
+            Ok(_) if !orders.is_empty() => {}
+            Ok(channels) => {
+                let _ = updates.send(Update::Channels(channels));
+            }
+            Err(error) => {
+                let _ = updates.send(Update::Status(format!("couldn't keep the order: {error:#}")));
+                // Back to the order the server has.
+                fetch_channels(&server, &updates).await;
+            }
+        }
+    }
+}
+
+async fn fetch_channels(server: &Server, updates: &UnboundedSender<Update>) {
+    let update = match server.get::<Vec<ChannelInfo>>("/api/v1/channels").await {
+        Ok(channels) => Update::Channels(channels),
+        Err(error) => Update::Status(format!("couldn't load channels: {error:#}")),
+    };
+    let _ = updates.send(update);
+}
+
+async fn fetch_undecrypted(server: &Server, updates: &UnboundedSender<Update>) {
+    let undecrypted = server
+        .get::<Vec<UnknownChannel>>("/api/v1/channels/unknown")
+        .await
+        .map_err(|error| format!("{error:#}"));
+    let _ = updates.send(Update::Undecrypted(undecrypted));
 }
 
 async fn fetch_contacts(server: &Server, updates: &UnboundedSender<Update>) {

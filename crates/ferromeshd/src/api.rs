@@ -9,10 +9,10 @@ use axum::extract::{Path, Query, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use ferromesh_model::{
-    AddChannel, AdvertRequest, AdvertSent, ChannelInfo, DEFAULT_HEALTH_HOURS,
+    AddChannel, AdvertRequest, AdvertSent, ChannelInfo, ChannelOrder, DEFAULT_HEALTH_HOURS,
     DEFAULT_HISTORY_LIMIT, DirectMessageInfo, DirectQuery, Event, Filter, Frame, GuessChannels,
     GuessReport, Health, HealthQuery, HistoryQuery, Kind, MAX_DIRECT, MAX_HEALTH_HOURS,
     MAX_HISTORY_LIMIT, MAX_NODES, MAX_OUTBOX, NodeInfo, NodesQuery, ObserverHealth, OutboxQuery,
@@ -90,6 +90,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/health", get(health))
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/channels", get(list_channels).post(add_channel))
+        .route("/api/v1/channels/order", put(order_channels))
         .route("/api/v1/channels/unknown", get(unknown_channels))
         .route("/api/v1/channels/guess", post(guess_channels))
         .route("/api/v1/nodes", get(list_nodes))
@@ -210,6 +211,28 @@ async fn add_channel(
         )),
         Err(error) => Err(ApiError::internal(error)),
     }
+}
+
+async fn order_channels(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ChannelOrder>,
+) -> Result<Json<Vec<ChannelInfo>>, ApiError> {
+    authorize(&state, &headers)?;
+    let known = read(&state, |reader| reader.channel_infos()).await?;
+    if let Some(name) =
+        request.names.iter().find(|name| !known.iter().any(|channel| channel.name == **name))
+    {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, format!("no channel is named {name}")));
+    }
+    let writer_gone =
+        || ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "the server can't make changes");
+    let writer = state.writer.clone().ok_or_else(writer_gone)?;
+    let (reply, outcome) = oneshot::channel();
+    let job = Job::OrderChannels { names: request.names, reply };
+    writer.send(job).await.map_err(|_| writer_gone())?;
+    outcome.await.map_err(|_| writer_gone())?.map_err(|error| ApiError::internal(error.into()))?;
+    Ok(Json(read(&state, |reader| reader.channel_infos()).await?))
 }
 
 /// How long to wait for the radio to take a message. Giving a channel a slot

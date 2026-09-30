@@ -26,6 +26,14 @@ pub struct AddChannel {
     pub key: Option<String>,
 }
 
+/// `PUT /api/v1/channels/order`: channel names to list first, in this order.
+/// Channels left out follow in the order they were in; the reply is the
+/// channel list in its new order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelOrder {
+    pub names: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelAdded {
     pub channel: ChannelInfo,
