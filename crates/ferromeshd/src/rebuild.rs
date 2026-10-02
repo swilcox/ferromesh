@@ -32,6 +32,7 @@ pub fn run(config: &Config, replace: bool) -> Result<()> {
             rebuilt.add_channel(&channel.name, &channel.key, channel.kind, channel.added_at)?;
         }
         rebuilt.order_channels(&current.channel_order()?)?;
+        rebuilt.mark_channels_read(&current.channel_reads()?)?;
     }
     pipeline::add_configured_channels(&mut rebuilt, config)?;
 

@@ -214,6 +214,11 @@ ALTER TABLE observers ADD COLUMN kind TEXT;
 ALTER TABLE channels ADD COLUMN position INTEGER NOT NULL DEFAULT 0;
 UPDATE channels SET position = id;
 "#,
+    r#"
+-- Messages on a channel received at or before this time have been read.
+-- A time rather than a message id, because a rebuild renumbers messages.
+ALTER TABLE channels ADD COLUMN read_through INTEGER NOT NULL DEFAULT 0;
+"#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {

@@ -30,6 +30,11 @@ pub enum Job {
     },
     /// Put these channels first in lists, in this order.
     OrderChannels { names: Vec<String>, reply: oneshot::Sender<ferromesh_store::Result<()>> },
+    /// Mark channels read through a time (microseconds), by name.
+    MarkRead {
+        reads: Vec<(String, ferromesh_store::Micros)>,
+        reply: oneshot::Sender<ferromesh_store::Result<()>>,
+    },
     /// Replies once every earlier job is done.
     Sync(oneshot::Sender<()>),
 }
@@ -87,6 +92,9 @@ impl Writer {
             }
             Job::OrderChannels { names, reply } => {
                 let _ = reply.send(self.store.order_channels(&names));
+            }
+            Job::MarkRead { reads, reply } => {
+                let _ = reply.send(self.store.mark_channels_read(&reads));
             }
             Job::Sync(reply) => {
                 self.flush()?;

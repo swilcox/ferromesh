@@ -47,11 +47,14 @@ GET  /api/v1/channels/unknown     # channel hashes on traffic no known key opens
 POST /api/v1/channels/guess       # {"names": [...], "builtin": true, "mentions": true}
 POST /api/v1/channels             # {"name": "#wx"} or {"name": "...", "key": "..."}   (token)
 PUT  /api/v1/channels/order       # {"names": ["#test", "public", ...]}   (token)
+PUT  /api/v1/channels/read        # {"reads": [{"name": "#test", "through": "2026-10-02T17:24:01Z"}]}   (token)
 ```
 
 Adding a channel backfills: stored traffic that was waiting for the key is decoded and appears in history. A new channel goes to the end of the list.
 
 Setting the order puts the channels named first, in that order; any left out keep their order after them. The reply is the channel list in its new order. The order is only for display (decryption tries keys in the order they were added), and `rebuild` keeps it.
+
+A channel is read through a time: the receive time of the newest message read. Each channel in the list carries `read_through` and `unread`, the messages received after it. A mark only moves forward, and `rebuild` keeps it. It's a time rather than a message id because a rebuild renumbers messages.
 
 ## Messaging
 

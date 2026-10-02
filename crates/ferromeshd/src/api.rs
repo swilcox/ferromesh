@@ -12,12 +12,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use ferromesh_model::{
-    AddChannel, AdvertRequest, AdvertSent, ChannelInfo, ChannelOrder, DEFAULT_HEALTH_HOURS,
-    DEFAULT_HISTORY_LIMIT, DirectMessageInfo, DirectQuery, Event, Filter, Frame, GuessChannels,
-    GuessReport, Health, HealthQuery, HistoryQuery, Kind, MAX_DIRECT, MAX_HEALTH_HOURS,
-    MAX_HISTORY_LIMIT, MAX_NODES, MAX_OUTBOX, NodeInfo, NodesQuery, ObserverHealth, OutboxQuery,
-    PacketDetail, PinRequest, RadioContact, SendRequest, SentMessageInfo, StreamQuery,
-    UnknownChannel,
+    AddChannel, AdvertRequest, AdvertSent, ChannelInfo, ChannelOrder, ChannelReads,
+    DEFAULT_HEALTH_HOURS, DEFAULT_HISTORY_LIMIT, DirectMessageInfo, DirectQuery, Event, Filter,
+    Frame, GuessChannels, GuessReport, Health, HealthQuery, HistoryQuery, Kind, MAX_DIRECT,
+    MAX_HEALTH_HOURS, MAX_HISTORY_LIMIT, MAX_NODES, MAX_OUTBOX, NodeInfo, NodesQuery,
+    ObserverHealth, OutboxQuery, PacketDetail, PinRequest, RadioContact, SendRequest,
+    SentMessageInfo, StreamQuery, UnknownChannel,
 };
 use ferromesh_store::{Micros, Order, Page, Reader, SendTarget};
 use jiff::Timestamp;
@@ -91,6 +91,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/stream", get(stream))
         .route("/api/v1/channels", get(list_channels).post(add_channel))
         .route("/api/v1/channels/order", put(order_channels))
+        .route("/api/v1/channels/read", put(mark_channels_read))
         .route("/api/v1/channels/unknown", get(unknown_channels))
         .route("/api/v1/channels/guess", post(guess_channels))
         .route("/api/v1/nodes", get(list_nodes))
@@ -233,6 +234,23 @@ async fn order_channels(
     writer.send(job).await.map_err(|_| writer_gone())?;
     outcome.await.map_err(|_| writer_gone())?.map_err(|error| ApiError::internal(error.into()))?;
     Ok(Json(read(&state, |reader| reader.channel_infos()).await?))
+}
+
+async fn mark_channels_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ChannelReads>,
+) -> Result<StatusCode, ApiError> {
+    authorize(&state, &headers)?;
+    let writer_gone =
+        || ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "the server can't make changes");
+    let writer = state.writer.clone().ok_or_else(writer_gone)?;
+    let reads =
+        request.reads.into_iter().map(|read| (read.name, read.through.as_microsecond())).collect();
+    let (reply, outcome) = oneshot::channel();
+    writer.send(Job::MarkRead { reads, reply }).await.map_err(|_| writer_gone())?;
+    outcome.await.map_err(|_| writer_gone())?.map_err(|error| ApiError::internal(error.into()))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// How long to wait for the radio to take a message. Giving a channel a slot

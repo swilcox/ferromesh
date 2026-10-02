@@ -14,8 +14,8 @@ mod send;
 mod wire;
 
 pub use channels::{
-    AddChannel, Backfill, ChannelAdded, ChannelInfo, ChannelOrder, Guess, GuessChannels,
-    GuessReport, UnknownChannel,
+    AddChannel, Backfill, ChannelAdded, ChannelInfo, ChannelOrder, ChannelRead, ChannelReads,
+    Guess, GuessChannels, GuessReport, UnknownChannel,
 };
 pub use detail::{MAX_NODES, NodeInfo, NodesQuery, PacketDetail, PacketReception};
 pub use direct::{DirectMessageInfo, DirectQuery, MAX_DIRECT};

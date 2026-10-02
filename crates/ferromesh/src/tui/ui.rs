@@ -797,6 +797,8 @@ mod tests {
                 added_at: at,
                 messages: 1,
                 last_message_at: Some(at),
+                read_through: None,
+                unread: 0,
             }]));
             app.apply(Update::Event(Event::Message(MessageEvent {
                 id: 1,

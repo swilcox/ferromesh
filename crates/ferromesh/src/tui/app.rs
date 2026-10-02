@@ -1899,6 +1899,8 @@ mod tests {
                 added_at: Timestamp::UNIX_EPOCH,
                 messages: 1,
                 last_message_at: None,
+                read_through: None,
+                unread: 0,
             })
             .collect();
         let unread = |app: &App, channel| app.unread().get(channel).copied().unwrap_or(0);
@@ -2178,6 +2180,8 @@ mod tests {
             added_at: Timestamp::UNIX_EPOCH,
             messages: 2,
             last_message_at: None,
+            read_through: None,
+            unread: 0,
         }]));
         assert!(app.guesses_for(0x12).is_empty());
         assert_eq!(app.undecrypted_list()[0].hash, 0x81);
@@ -2198,6 +2202,8 @@ mod tests {
             added_at: Timestamp::UNIX_EPOCH,
             messages,
             last_message_at: last.map(|second| Timestamp::from_second(second).unwrap()),
+            read_through: None,
+            unread: 0,
         }
     }
 

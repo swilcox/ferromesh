@@ -236,3 +236,30 @@ async fn reorder_channels() {
     let channels: Vec<ChannelInfo> = server.get("/api/v1/channels").await;
     assert_eq!(names(&channels), ["#wx", "#test", "public", "#bot"]);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_remember_what_was_read() {
+    let server = Server::start(Some(TOKEN)).await;
+    server.store((1..=3).map(|n| record("#test", n, &format!("Alice: {n}"))).collect()).await;
+    let test = |channels: Vec<ChannelInfo>| {
+        let test = channels.into_iter().find(|channel| channel.name == "#test").unwrap();
+        (test.unread, test.read_through)
+    };
+    assert_eq!(test(server.get("/api/v1/channels").await), (3, None));
+
+    // Read through the second message, received at 1_789_000_002.
+    let second = Timestamp::from_second(1_789_000_002).unwrap();
+    let read = format!(r##"{{"reads": [{{"name": "#test", "through": "{second}"}}]}}"##);
+    let (status, _) = server.request("PUT", "/api/v1/channels/read", None, &read).await;
+    assert_eq!(status, 401);
+    let (status, body) = server.request("PUT", "/api/v1/channels/read", Some(TOKEN), &read).await;
+    assert_eq!(status, 204, "{body}");
+    assert_eq!(test(server.get("/api/v1/channels").await), (1, Some(second)));
+
+    // An older mark doesn't undo a newer one.
+    let first = Timestamp::from_second(1_789_000_001).unwrap();
+    let older = format!(r##"{{"reads": [{{"name": "#test", "through": "{first}"}}]}}"##);
+    let (status, _) = server.request("PUT", "/api/v1/channels/read", Some(TOKEN), &older).await;
+    assert_eq!(status, 204);
+    assert_eq!(test(server.get("/api/v1/channels").await), (1, Some(second)));
+}

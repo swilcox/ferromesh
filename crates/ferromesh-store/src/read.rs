@@ -247,10 +247,11 @@ pub(crate) fn events(conn: &Connection, kind: Kind, ids: &[i64]) -> Result<Vec<E
     Ok(events)
 }
 
-/// Every channel, or just `id`, with its message count.
+/// Every channel, or just `id`, with its message and unread counts.
 pub(crate) fn channel_infos(conn: &Connection, id: Option<i64>) -> Result<Vec<ChannelInfo>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT c.name, c.kind, c.hash, c.enabled, c.added_at, count(m.id), max(m.first_seen_at)
+        "SELECT c.name, c.kind, c.hash, c.enabled, c.added_at, count(m.id), max(m.first_seen_at),
+                c.read_through, count(m.id) FILTER (WHERE m.first_seen_at > c.read_through)
          FROM channels c
          LEFT JOIN messages m ON m.channel_id = c.id
          WHERE ?1 IS NULL OR c.id = ?1
@@ -267,6 +268,8 @@ pub(crate) fn channel_infos(conn: &Connection, id: Option<i64>) -> Result<Vec<Ch
                 added_at: timestamp(row, 4)?,
                 messages: row.get(5)?,
                 last_message_at: optional_timestamp(row, 6)?,
+                read_through: optional_timestamp(row, 7)?.filter(|at| *at != Timestamp::UNIX_EPOCH),
+                unread: row.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

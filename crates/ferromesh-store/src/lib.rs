@@ -224,6 +224,32 @@ impl Store {
         Ok(())
     }
 
+    /// Marks channels read through a time, by name; a mark only moves
+    /// forward. Names that match no channel are ignored.
+    pub fn mark_channels_read(&mut self, reads: &[(String, Micros)]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut update = tx.prepare(
+                "UPDATE channels SET read_through = max(read_through, ?2) WHERE name = ?1",
+            )?;
+            for (name, through) in reads {
+                update.execute(params![name, through])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// How far each channel has been read, by name.
+    pub fn channel_reads(&self) -> Result<Vec<(String, Micros)>> {
+        let mut stmt =
+            self.conn.prepare("SELECT name, read_through FROM channels WHERE read_through > 0")?;
+        let reads = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(reads)
+    }
+
     /// Channel names in list order.
     pub fn channel_order(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT name FROM channels ORDER BY position, id")?;

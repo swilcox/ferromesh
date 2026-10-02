@@ -15,6 +15,12 @@ pub struct ChannelInfo {
     pub added_at: Timestamp,
     pub messages: i64,
     pub last_message_at: Option<Timestamp>,
+    /// Messages received up to this time have been read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_through: Option<Timestamp>,
+    /// Messages received after [`read_through`](Self::read_through).
+    #[serde(default)]
+    pub unread: i64,
 }
 
 /// `POST /api/v1/channels`. A hashtag channel (`#name`) needs only its name;
@@ -24,6 +30,19 @@ pub struct AddChannel {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+}
+
+/// `PUT /api/v1/channels/read`: channels read up to a time, each the receive
+/// time of the newest message read. A channel's mark only moves forward.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelReads {
+    pub reads: Vec<ChannelRead>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelRead {
+    pub name: String,
+    pub through: Timestamp,
 }
 
 /// `PUT /api/v1/channels/order`: channel names to list first, in this order.
