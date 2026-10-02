@@ -12,17 +12,18 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use ferromesh_model::{
-    AddChannel, AdvertRequest, AdvertSent, ChannelInfo, ChannelOrder, ChannelReads,
+    AddChannel, AdvertRequest, AdvertSent, ChannelInfo, ChannelOrder, ChannelReads, ChannelScope,
     DEFAULT_HEALTH_HOURS, DEFAULT_HISTORY_LIMIT, DirectMessageInfo, DirectQuery, Event, Filter,
     Frame, GuessChannels, GuessReport, Health, HealthQuery, HistoryQuery, Kind, MAX_DIRECT,
     MAX_HEALTH_HOURS, MAX_HISTORY_LIMIT, MAX_NODES, MAX_OUTBOX, NodeInfo, NodesQuery,
-    ObserverHealth, OutboxQuery, PacketDetail, PinRequest, RadioContact, SendRequest,
+    ObserverHealth, OutboxQuery, PacketDetail, PinRequest, RadioContact, Scope, SendRequest,
     SentMessageInfo, StreamQuery, UnknownChannel,
 };
 use ferromesh_store::{Micros, Order, Page, Reader, SendTarget};
 use jiff::Timestamp;
 use meshcore_proto::NodeRole;
 use meshcore_proto::companion::Contact;
+use meshcore_proto::scope::region_name;
 use tokio::net::TcpListener;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -50,6 +51,8 @@ pub struct AppState {
     token: Option<Arc<str>>,
     /// The companion radio, for sending; without it sending is refused.
     companion: Option<std::sync::mpsc::Sender<Request>>,
+    /// Regions to offer when sending, from the config.
+    scopes: Arc<Vec<String>>,
 }
 
 impl AppState {
@@ -67,7 +70,15 @@ impl AppState {
             writer: None,
             token: None,
             companion: None,
+            scopes: Arc::new(Vec::new()),
         }
+    }
+
+    /// The regions clients offer when sending, named without `#`.
+    pub fn with_scopes(mut self, scopes: &[String]) -> Self {
+        let names = scopes.iter().map(|name| region_name(name).to_owned());
+        self.scopes = Arc::new(names.filter(|name| !name.is_empty()).collect());
+        self
     }
 
     /// Accepts changes, handed to the writer thread, from clients presenting
@@ -92,6 +103,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/channels", get(list_channels).post(add_channel))
         .route("/api/v1/channels/order", put(order_channels))
         .route("/api/v1/channels/read", put(mark_channels_read))
+        .route("/api/v1/channels/scope", put(set_channel_scope))
+        .route("/api/v1/scopes", get(list_scopes))
         .route("/api/v1/channels/unknown", get(unknown_channels))
         .route("/api/v1/channels/guess", post(guess_channels))
         .route("/api/v1/nodes", get(list_nodes))
@@ -236,6 +249,34 @@ async fn order_channels(
     Ok(Json(read(&state, |reader| reader.channel_infos()).await?))
 }
 
+async fn list_scopes(State(state): State<AppState>) -> Json<Vec<String>> {
+    Json(state.scopes.as_ref().clone())
+}
+
+async fn set_channel_scope(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ChannelScope>,
+) -> Result<StatusCode, ApiError> {
+    authorize(&state, &headers)?;
+    if let Scope::Region(name) = &request.scope
+        && (name.is_empty() || name.contains(char::is_whitespace))
+    {
+        return Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            format!("{name:?} isn't a region name"),
+        ));
+    }
+    let writer_gone =
+        || ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "the server can't make changes");
+    let writer = state.writer.clone().ok_or_else(writer_gone)?;
+    let (reply, outcome) = oneshot::channel();
+    let job = Job::ChannelScope { name: request.name, scope: request.scope, reply };
+    writer.send(job).await.map_err(|_| writer_gone())?;
+    outcome.await.map_err(|_| writer_gone())?.map_err(|error| ApiError::internal(error.into()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn mark_channels_read(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -275,8 +316,22 @@ async fn send_message(
 
     let (reply, answer) = oneshot::channel();
     let text = request.text;
+    let asked = request.scope;
     let request = match target {
         SendTarget::Channel { name, secret } => {
+            // Unless the send says otherwise, the channel's own scope.
+            let scope = match asked {
+                Some(scope) => scope,
+                None => {
+                    let channel = name.clone();
+                    read(&state, move |reader| reader.channel_infos())
+                        .await?
+                        .into_iter()
+                        .find(|info| info.name == channel)
+                        .map(|info| info.scope)
+                        .unwrap_or_default()
+                }
+            };
             let secret = secret.as_slice().try_into().map_err(|_| {
                 ApiError::new(
                     StatusCode::BAD_REQUEST,
@@ -285,9 +340,14 @@ async fn send_message(
                     ),
                 )
             })?;
-            Request::Channel { name, secret, text, reply }
+            Request::Channel { name, secret, text, scope, reply }
         }
-        SendTarget::Node(node) => Request::Direct { contact: contact_from(&node), text, reply },
+        SendTarget::Node(node) => Request::Direct {
+            contact: contact_from(&node),
+            text,
+            scope: asked.unwrap_or_default(),
+            reply,
+        },
         SendTarget::Ambiguous(matches) => {
             return Err(ApiError::new(
                 StatusCode::BAD_REQUEST,

@@ -2,7 +2,7 @@
 
 use std::ops::Range;
 
-use ferromesh_model::{Event, Kind, SendStatus};
+use ferromesh_model::{Event, Kind, Scope, SendStatus};
 use jiff::Timestamp;
 use meshcore_proto::mention;
 use ratatui::Frame;
@@ -217,7 +217,11 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         let label = match input.prompt {
             Prompt::Filter => format!("filter {}: ", app.view.title().to_lowercase()),
             Prompt::Watch => "watch: ".to_owned(),
-            Prompt::Compose => format!("message {}: ", app.compose_target().unwrap_or_default()),
+            Prompt::Compose => format!(
+                "message {} · {}: ",
+                app.compose_target().unwrap_or_default(),
+                app.compose_scope().label()
+            ),
             Prompt::Recipient => "write to (a name, or the start of a key): ".to_owned(),
             Prompt::AddChannel => "add channel (#name, or a name and its key): ".to_owned(),
             Prompt::Guess => "guess names (blank for common ones and hashtags seen): ".to_owned(),
@@ -231,6 +235,9 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         let cursor = Line::from(spans.clone()).width() as u16;
         match &input.error {
             Some(error) => spans.push(Span::styled(format!("   {error}"), Color::Red)),
+            None if input.prompt == Prompt::Compose => {
+                spans.push(Span::raw("   Enter to send, Tab scope, Esc to cancel").dim());
+            }
             None => spans.push(Span::raw("   Enter to apply, Esc to cancel").dim()),
         }
         frame.render_widget(Line::from(spans), area);
@@ -561,6 +568,9 @@ fn dm_lines(
     if let Some(note) = delivery(message) {
         content.push(Span::raw(format!("  {note}")).dim());
     }
+    if let Some(scope) = message.scope.as_ref().filter(|scope| **scope != Scope::Default) {
+        content.push(Span::raw(format!(" · {}", scope.label())).dim());
+    }
     wrap(prefix, content, width)
 }
 
@@ -794,7 +804,7 @@ mod tests {
         use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
         use ferromesh_model::{
             ChannelInfo, DecodeState, DirectMessageInfo, MessageEvent, NodeInfo, PacketDetail,
-            PacketEvent, PacketReception, RadioContact, SentMessageInfo,
+            PacketEvent, PacketReception, RadioContact, Scope, SentMessageInfo,
         };
         use jiff::tz::TimeZone;
         use meshcore_proto::{ChannelKey, GroupText};
@@ -821,6 +831,7 @@ mod tests {
                 last_message_at: Some(at),
                 read_through: None,
                 unread: 0,
+                scope: Scope::Default,
             }]));
             app.apply(Update::Event(Event::Message(MessageEvent {
                 id: 1,
@@ -893,6 +904,46 @@ mod tests {
             let lines = render(&app, 100, 8);
             assert!(lines[2].contains("─ 1 new since you started ─"), "{lines:#?}");
             assert!(lines[3].starts_with("│ #wx                    │"), "read now\n{lines:#?}");
+        }
+
+        #[test]
+        fn picking_a_scope_while_composing() {
+            let mut app = app();
+            app.apply(Update::Scopes(vec!["us-tn".into(), "us-tn-bna".into()]));
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::Down);
+            press(&mut app, KeyCode::Char('c'));
+            let footer = |app: &App| render(app, 100, 6).pop().unwrap();
+            assert!(footer(&app).starts_with("message #wx · default:"), "{}", footer(&app));
+
+            // Tab steps through none, then each region; Shift-Tab goes back.
+            for (key, label) in [
+                (KeyCode::Tab, "*"),
+                (KeyCode::Tab, "us-tn"),
+                (KeyCode::Tab, "us-tn-bna"),
+                (KeyCode::BackTab, "us-tn"),
+            ] {
+                press(&mut app, key);
+                assert!(footer(&app).starts_with(&format!("message #wx · {label}:")));
+            }
+            for c in "hi".chars() {
+                press(&mut app, KeyCode::Char(c));
+            }
+            let region = Scope::Region("us-tn".into());
+            assert_eq!(
+                app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))),
+                [
+                    Command::Send {
+                        to: "#wx".into(),
+                        text: "hi".into(),
+                        scope: Some(region.clone())
+                    },
+                    Command::ChannelScope { name: "#wx".into(), scope: region },
+                ]
+            );
+            // The channel keeps it for next time.
+            press(&mut app, KeyCode::Char('c'));
+            assert!(footer(&app).starts_with("message #wx · us-tn:"), "{}", footer(&app));
         }
 
         #[test]
@@ -981,6 +1032,7 @@ mod tests {
                 heard: 0,
                 heard_by: Vec::new(),
                 packet_hash: None,
+                scope: None,
             }]));
 
             // People are listed under the channels; End goes to the last.
@@ -1001,7 +1053,14 @@ mod tests {
             }
             let sent =
                 app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-            assert_eq!(sent, [Command::Send { to: "KK4SW".into(), text: "yes".into() }]);
+            assert_eq!(
+                sent,
+                [Command::Send {
+                    to: "KK4SW".into(),
+                    text: "yes".into(),
+                    scope: Some(Scope::Default)
+                }]
+            );
         }
 
         #[test]
@@ -1090,7 +1149,14 @@ mod tests {
             assert!(lines.contains("nothing exchanged with KQ8B yet"), "{lines}");
 
             type_in(&mut app, "hi");
-            assert_eq!(enter(&mut app), [Command::Send { to: "KQ8B".into(), text: "hi".into() }]);
+            assert_eq!(
+                enter(&mut app),
+                [Command::Send {
+                    to: "KQ8B".into(),
+                    text: "hi".into(),
+                    scope: Some(Scope::Default)
+                }]
+            );
 
             // The thread follows the name the server resolved.
             app.apply(Update::Wrote("KQ8B Bob".into()));
@@ -1111,7 +1177,14 @@ mod tests {
             press(&mut app, KeyCode::Char('3'));
             press(&mut app, KeyCode::Char('m'));
             type_in(&mut app, "yo");
-            assert_eq!(enter(&mut app), [Command::Send { to: "Alice".into(), text: "yo".into() }]);
+            assert_eq!(
+                enter(&mut app),
+                [Command::Send {
+                    to: "Alice".into(),
+                    text: "yo".into(),
+                    scope: Some(Scope::Default)
+                }]
+            );
         }
 
         #[test]
@@ -1123,12 +1196,18 @@ mod tests {
             }
             let lines = render(&app, 80, 12);
             let footer = lines.len() - 1;
-            assert!(lines[footer].starts_with("message #wx: @[Bob] hi :tad"), "{lines:#?}");
+            assert!(
+                lines[footer].starts_with("message #wx · default: @[Bob] hi :tad"),
+                "{lines:#?}"
+            );
             let column = |line: &str, c: char| line.chars().position(|x| x == c);
             let first = lines.iter().position(|line| line.contains(":tada:")).unwrap();
             assert!(first < footer, "{lines:#?}");
             // The box starts under the colon that began the code.
-            assert_eq!(column(&lines[first - 1], '┌'), Some("message #wx: @[Bob] hi ".len()));
+            assert_eq!(
+                column(&lines[first - 1], '┌'),
+                Some("message #wx · default: @[Bob] hi ".chars().count())
+            );
         }
 
         #[test]
@@ -1176,13 +1255,17 @@ mod tests {
             // own channel, whatever the sidebar has selected.
             press(&mut app, KeyCode::Char('r'));
             let lines = render(&app, 100, 8).join("\n");
-            assert!(lines.contains("message #wx: @[Bob] "), "{lines}");
+            assert!(lines.contains("message #wx · default: @[Bob] "), "{lines}");
             for key in "hi".chars() {
                 press(&mut app, KeyCode::Char(key));
             }
             assert_eq!(
                 enter(&mut app),
-                [Command::Send { to: "#wx".into(), text: "@[Bob] hi".into() }]
+                [Command::Send {
+                    to: "#wx".into(),
+                    text: "@[Bob] hi".into(),
+                    scope: Some(Scope::Default)
+                }]
             );
 
             // A received mention is shown as @Bob, without the brackets.
@@ -1207,7 +1290,14 @@ mod tests {
             for key in "yo".chars() {
                 press(&mut app, KeyCode::Char(key));
             }
-            assert_eq!(enter(&mut app), [Command::Send { to: "Ann".into(), text: "yo".into() }]);
+            assert_eq!(
+                enter(&mut app),
+                [Command::Send {
+                    to: "Ann".into(),
+                    text: "yo".into(),
+                    scope: Some(Scope::Default)
+                }]
+            );
         }
 
         /// Every view and overlay draws, even on the smallest screen.

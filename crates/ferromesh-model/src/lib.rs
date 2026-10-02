@@ -15,7 +15,7 @@ mod wire;
 
 pub use channels::{
     AddChannel, Backfill, ChannelAdded, ChannelInfo, ChannelOrder, ChannelRead, ChannelReads,
-    Guess, GuessChannels, GuessReport, UnknownChannel,
+    ChannelScope, Guess, GuessChannels, GuessReport, UnknownChannel,
 };
 pub use detail::{MAX_NODES, NodeInfo, NodesQuery, PacketDetail, PacketReception};
 pub use direct::{DirectMessageInfo, DirectQuery, MAX_DIRECT};
@@ -25,7 +25,7 @@ pub use health::{
     DEFAULT_HEALTH_HOURS, HealthHour, HealthQuery, MAX_HEALTH_HOURS, ObserverHealth, ObserverState,
 };
 pub use radio::{AdvertRequest, AdvertSent, PinRequest, RadioContact};
-pub use send::{MAX_OUTBOX, OutboxQuery, SendRequest, SendStatus, SentMessageInfo};
+pub use send::{MAX_OUTBOX, OutboxQuery, Scope, SendRequest, SendStatus, SentMessageInfo};
 pub use wire::{
     DEFAULT_HISTORY_LIMIT, DEFAULT_PORT, Frame, Health, HistoryQuery, MAX_HISTORY_LIMIT,
     StreamQuery,

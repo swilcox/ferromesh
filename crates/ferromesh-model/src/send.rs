@@ -14,6 +14,46 @@ pub struct SendRequest {
     /// direct message: its advertised name or a prefix of its key in hex.
     pub to: String,
     pub text: String,
+    /// The region a flood send is kept to. Without one, a channel message
+    /// takes its channel's scope, and a direct message the radio's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Scope>,
+}
+
+/// Which region a flood send is kept to; MeshCore calls them regions, and
+/// repeaters pass on only the regions they're configured for. In JSON:
+/// `"default"`, `"unscoped"` or `{"region": "us-tn-middle"}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// The radio's own default region, if it has one.
+    #[default]
+    Default,
+    /// No region, written `*`: every repeater may pass it on.
+    Unscoped,
+    /// A region, named without `#`.
+    Region(String),
+}
+
+impl Scope {
+    /// `*` for unscoped, `default` for the radio's default, otherwise a
+    /// region, with or without `#`.
+    pub fn parse(text: &str) -> Self {
+        match text.trim() {
+            "*" => Self::Unscoped,
+            "" | "default" => Self::Default,
+            name => Self::Region(meshcore_proto::scope::region_name(name).to_owned()),
+        }
+    }
+
+    /// As [`parse`](Self::parse) reads it.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Default => "default",
+            Self::Unscoped => "*",
+            Self::Region(name) => name,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,4 +114,8 @@ pub struct SentMessageInfo {
     pub heard_by: Vec<String>,
     /// Channel messages: the packet's hash, for `GET /api/v1/packets/{hash}`.
     pub packet_hash: Option<String>,
+    /// The region it was kept to, if it was sent with one. Older sends
+    /// don't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<Scope>,
 }

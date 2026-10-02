@@ -9,11 +9,13 @@ use std::io::{ErrorKind, Read, Write};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use ferromesh_model::Scope;
 use jiff::Timestamp;
 use meshcore_proto::companion::{
-    self, ChannelInfo, Contact, Deframer, DeviceInfo, Frame, LoggedIn, SelfInfo, Sent, StatsKind,
-    autoadd, code, command, error,
+    self, ChannelInfo, Contact, Deframer, DeviceInfo, FloodScope, Frame, LoggedIn, SelfInfo, Sent,
+    StatsKind, autoadd, code, command, error,
 };
+use meshcore_proto::scope::region_key;
 use tracing::{debug, info};
 
 /// How long a command may take to answer.
@@ -74,6 +76,9 @@ pub struct Session<L> {
     logins: Vec<LoginResult>,
     /// The contact list as last read; see [`Session::contacts`].
     contacts: Option<ContactCache>,
+    /// The scope the radio's flood sends have, as last set here; `None`
+    /// until then, since another app may have left it anything.
+    scope: Option<FloodScope>,
 }
 
 /// The radio's contact list, kept so that clients asking every minute don't
@@ -152,6 +157,7 @@ impl<L: Read + Write> Session<L> {
             slots: None,
             logins: Vec::new(),
             contacts: None,
+            scope: None,
         };
         let reply = session.request(&companion::device_query())?;
         let Frame::DeviceInfo(device) = Frame::parse(&reply)? else {
@@ -281,6 +287,33 @@ impl<L: Read + Write> Session<L> {
         Ok(ok_or_refusal(&reply, "advertising"))
     }
 
+    /// Scopes the radio's flood sends from now on. The radio keeps a scope
+    /// until it's changed, so every send sets its own; the command goes only
+    /// when it would change something.
+    pub fn set_scope(&mut self, scope: &Scope) -> Result<Result<(), Refusal>> {
+        let wanted = match scope {
+            Scope::Default => FloodScope::Default,
+            Scope::Unscoped => FloodScope::Unscoped,
+            Scope::Region(name) => FloodScope::Region(region_key(name)),
+        };
+        if self.scope == Some(wanted) {
+            return Ok(Ok(()));
+        }
+        let reply = self.request(&companion::set_flood_scope(wanted))?;
+        match (Frame::parse(&reply)?, wanted) {
+            (Frame::Ok, _) => {}
+            (Frame::Err(Some(error::UNSUPPORTED)), FloodScope::Region(_)) => {
+                return Ok(Err("this radio's firmware doesn't support regions".to_owned()));
+            }
+            // Firmware from before regions sends everything unscoped, which
+            // is all that's asked of it.
+            (Frame::Err(Some(error::UNSUPPORTED)), _) => {}
+            _ => return Ok(Err(refusal(&reply, "setting the scope"))),
+        }
+        self.scope = Some(wanted);
+        Ok(Ok(()))
+    }
+
     /// Transmits `text` on the channel with `secret`, first giving the
     /// channel one of the radio's slots if it has none.
     pub fn send_channel(
@@ -289,7 +322,11 @@ impl<L: Read + Write> Session<L> {
         secret: &[u8; 16],
         timestamp: u32,
         text: &str,
+        scope: &Scope,
     ) -> Result<Result<(), Refusal>> {
+        if let Err(refusal) = self.set_scope(scope)? {
+            return Ok(Err(refusal));
+        }
         let slot = match self.channel_slot(name, secret)? {
             Ok(slot) => slot,
             Err(refusal) => return Ok(Err(refusal)),
@@ -305,7 +342,12 @@ impl<L: Read + Write> Session<L> {
         contact: &Contact,
         timestamp: u32,
         text: &str,
+        scope: &Scope,
     ) -> Result<Result<Sent, Refusal>> {
+        // Only a flood needs it, but the radio decides whether to flood.
+        if let Err(refusal) = self.set_scope(scope)? {
+            return Ok(Err(refusal));
+        }
         // Whoever you write to is kept for the replies.
         if let Err(refusal) = self.set_favourite(contact, true)? {
             return Ok(Err(refusal));
@@ -711,7 +753,8 @@ pub(crate) mod tests {
                 }
                 command::SEND_CHANNEL_TXT_MSG
                 | command::SET_DEVICE_TIME
-                | command::SEND_SELF_ADVERT => ok,
+                | command::SEND_SELF_ADVERT
+                | command::SET_FLOOD_SCOPE => ok,
                 // Contacts are kept as the frames that added them, which have
                 // the same layout as the radio's contact frames.
                 command::GET_CONTACT_BY_KEY => {
@@ -902,6 +945,27 @@ pub(crate) mod tests {
             lat_e6: 0,
             lon_e6: 0,
         }
+    }
+
+    #[test]
+    fn the_scope_is_set_only_when_it_changes() {
+        let mut session = Session::start(FakeRadio::default()).unwrap();
+        let scopes = |session: &mut Session<FakeRadio>| -> Vec<Vec<u8>> {
+            let commands = std::mem::take(&mut session.link.commands);
+            commands.into_iter().filter(|c| c[0] == command::SET_FLOOD_SCOPE).collect()
+        };
+        let us_tn = Scope::Region("us-tn".into());
+        for scope in [&Scope::Default, &Scope::Default, &us_tn, &us_tn, &Scope::Unscoped] {
+            session.send_channel("#test", &[7; 16], 1, "hi", scope).unwrap().unwrap();
+        }
+        assert_eq!(
+            scopes(&mut session),
+            [
+                companion::set_flood_scope(FloodScope::Default),
+                companion::set_flood_scope(FloodScope::Region(region_key("us-tn"))),
+                companion::set_flood_scope(FloodScope::Unscoped),
+            ]
+        );
     }
 
     #[test]

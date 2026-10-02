@@ -22,6 +22,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use ferromesh_model::Scope;
 use jiff::Timestamp;
 use meshcore_proto::companion::{Contact, Frame, MAX_TEXT_LEN, Stats};
 use meshcore_proto::{ChannelKey, GroupText, PacketHash, PayloadType};
@@ -55,11 +56,13 @@ pub enum Request {
         name: String,
         secret: [u8; 16],
         text: String,
+        scope: Scope,
         reply: Reply,
     },
     Direct {
         contact: Contact,
         text: String,
+        scope: Scope,
         reply: Reply,
     },
     /// Advertise the radio, so others can add it as a contact.
@@ -345,7 +348,7 @@ fn handle<L: Read + Write>(
     last_flood_advert: &mut Option<Instant>,
 ) -> Result<()> {
     match request {
-        Request::Channel { name, secret, text, reply } => {
+        Request::Channel { name, secret, text, scope, reply } => {
             // The radio sends `<its name>: <text>`, and that counts too.
             let limit = MAX_TEXT_LEN.saturating_sub(identity.info.name.len() + 2);
             if let Err(problem) = check_text(&text, limit) {
@@ -353,7 +356,7 @@ fn handle<L: Read + Write>(
                 return Ok(());
             }
             let packet_hash = channel_packet_hash(&identity.info.name, &secret, timestamp, &text);
-            let result = session.send_channel(&name, &secret, timestamp, &text);
+            let result = session.send_channel(&name, &secret, timestamp, &text, &scope);
             let outcome = flatten(&result);
             let error = outcome.as_ref().err().map(String::as_str);
             send(
@@ -366,6 +369,7 @@ fn handle<L: Read + Write>(
                     &text,
                     timestamp,
                     &packet_hash,
+                    &scope,
                     error,
                 ),
             );
@@ -429,12 +433,12 @@ fn handle<L: Read + Write>(
             let _ = reply.send(flatten(&result).map_err(SendError::Failed));
             result.map(|_| ())
         }
-        Request::Direct { contact, text, reply } => {
+        Request::Direct { contact, text, scope, reply } => {
             if let Err(problem) = check_text(&text, MAX_TEXT_LEN) {
                 let _ = reply.send(Err(SendError::Invalid(problem)));
                 return Ok(());
             }
-            let result = session.send_direct(&contact, timestamp, &text);
+            let result = session.send_direct(&contact, timestamp, &text, &scope);
             let outcome = flatten(&result);
             let recorded = outcome.as_ref().map_err(String::as_str);
             send(
@@ -446,6 +450,7 @@ fn handle<L: Read + Write>(
                     &contact,
                     &text,
                     timestamp,
+                    &scope,
                     recorded,
                 ),
             );
@@ -642,8 +647,13 @@ mod tests {
         let identity = session.identity().clone();
         let (jobs, mut queue) = mpsc::channel(16);
         let (reply, answer) = oneshot::channel();
-        let request =
-            Request::Channel { name: "#test".into(), secret: [7; 16], text: "hi".into(), reply };
+        let request = Request::Channel {
+            name: "#test".into(),
+            secret: [7; 16],
+            text: "hi".into(),
+            scope: Scope::Default,
+            reply,
+        };
         handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_000, &mut None)
             .unwrap();
         assert_eq!(
@@ -676,8 +686,13 @@ mod tests {
 
         // A second send reuses the slot without setting it again.
         let (reply, _answer) = oneshot::channel();
-        let request =
-            Request::Channel { name: "#test".into(), secret: [7; 16], text: "again".into(), reply };
+        let request = Request::Channel {
+            name: "#test".into(),
+            secret: [7; 16],
+            text: "again".into(),
+            scope: Scope::Default,
+            reply,
+        };
         handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_001, &mut None)
             .unwrap();
         let sets = session.link().commands.iter().filter(|c| c[0] == command::SET_CHANNEL).count();
@@ -690,7 +705,12 @@ mod tests {
         let identity = session.identity().clone();
         let (jobs, mut queue) = mpsc::channel(16);
         let (reply, answer) = oneshot::channel();
-        let request = Request::Direct { contact: contact(), text: "hello".into(), reply };
+        let request = Request::Direct {
+            contact: contact(),
+            text: "hello".into(),
+            scope: Scope::Default,
+            reply,
+        };
         handle(&mut session, &identity, "companion:test", &jobs, request, 1_789_000_000, &mut None)
             .unwrap();
         assert_eq!(
@@ -698,9 +718,15 @@ mod tests {
             Ok(Accepted { sender_timestamp: 1_789_000_000 })
         );
         let order: Vec<u8> = session.link().commands.iter().map(|c| c[0]).skip(2).collect();
+        // The scope first: another app may have left the radio any.
         assert_eq!(
             order,
-            [command::GET_CONTACT_BY_KEY, command::ADD_UPDATE_CONTACT, command::SEND_TXT_MSG]
+            [
+                command::SET_FLOOD_SCOPE,
+                command::GET_CONTACT_BY_KEY,
+                command::ADD_UPDATE_CONTACT,
+                command::SEND_TXT_MSG
+            ]
         );
 
         let records = records(&mut queue);
@@ -731,6 +757,7 @@ mod tests {
                 name: "#test".into(),
                 secret: [7; 16],
                 text: text.into(),
+                scope: Scope::Default,
                 reply,
             };
             handle(&mut session, &identity, "companion:test", &jobs, request, 1, &mut None)
@@ -746,6 +773,7 @@ mod tests {
             name: "#test".into(),
             secret: [7; 16],
             text: "x".repeat(154),
+            scope: Scope::Default,
             reply,
         };
         handle(&mut session, &identity, "companion:test", &jobs, request, 2, &mut None).unwrap();
@@ -813,7 +841,12 @@ mod tests {
         let identity = session.identity().clone();
         let (jobs, mut queue) = mpsc::channel(16);
         let (reply, answer) = oneshot::channel();
-        let request = Request::Direct { contact: contact(), text: "hello".into(), reply };
+        let request = Request::Direct {
+            contact: contact(),
+            text: "hello".into(),
+            scope: Scope::Default,
+            reply,
+        };
         handle(&mut session, &identity, "companion:test", &jobs, request, 5, &mut None).unwrap();
         assert_eq!(
             answer.blocking_recv().unwrap(),

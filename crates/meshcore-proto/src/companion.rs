@@ -44,6 +44,7 @@ pub mod command {
     pub const SEND_LOGIN: u8 = 26;
     pub const LOGOUT: u8 = 29;
     pub const SET_OTHER_PARAMS: u8 = 38;
+    pub const SET_FLOOD_SCOPE: u8 = 54;
     pub const GET_STATS: u8 = 56;
     pub const SET_AUTOADD_CONFIG: u8 = 58;
     pub const GET_AUTOADD_CONFIG: u8 = 59;
@@ -227,6 +228,29 @@ pub fn set_channel(slot: u8, name: &str, secret: &[u8; 16]) -> Vec<u8> {
 /// for each, then [`Frame::EndOfContacts`].
 pub fn get_contacts() -> Vec<u8> {
     vec![command::GET_CONTACTS]
+}
+
+/// Which region the radio's flood sends are scoped to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloodScope {
+    /// The radio's own default region, or none if it has no default.
+    Default,
+    /// No region: `*`.
+    Unscoped,
+    /// A region's key, from [`crate::scope::region_key`].
+    Region([u8; 16]),
+}
+
+/// Scopes the radio's flood sends from now on: channel messages, and direct
+/// messages to nodes with no known route. It stays until changed, and
+/// adverts keep the radio's default whatever this says. Answered by
+/// [`Frame::Ok`], or [`Frame::Err`] from firmware without regions.
+pub fn set_flood_scope(scope: FloodScope) -> Vec<u8> {
+    match scope {
+        FloodScope::Default => vec![command::SET_FLOOD_SCOPE, 0],
+        FloodScope::Unscoped => vec![command::SET_FLOOD_SCOPE, 1],
+        FloodScope::Region(key) => [&[command::SET_FLOOD_SCOPE, 0][..], &key].concat(),
+    }
 }
 
 /// Lists only the contacts changed after `since`, a time in the radio's
@@ -874,6 +898,10 @@ mod tests {
         );
         assert_eq!(Frame::parse(&[code::END_OF_CONTACTS]).unwrap(), Frame::EndOfContacts(None));
         assert_eq!(get_contacts_since(10_000), [command::GET_CONTACTS, 0x10, 0x27, 0, 0]);
+        assert_eq!(set_flood_scope(FloodScope::Default), [54, 0]);
+        assert_eq!(set_flood_scope(FloodScope::Unscoped), [54, 1]);
+        let region = set_flood_scope(FloodScope::Region([9; 16]));
+        assert_eq!((region.len(), &region[..3]), (18, &[54, 0, 9][..]));
         assert_eq!(
             Frame::parse(&[code::AUTOADD_CONFIG, 3, 0]).unwrap(),
             Frame::AutoAddConfig { policy: 3, max_hops: 0 }

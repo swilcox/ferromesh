@@ -21,6 +21,10 @@ pub struct ChannelInfo {
     /// Messages received after [`read_through`](Self::read_through).
     #[serde(default)]
     pub unread: i64,
+    /// The region messages to it are sent with, unless a send says
+    /// otherwise.
+    #[serde(default)]
+    pub scope: crate::Scope,
 }
 
 /// `POST /api/v1/channels`. A hashtag channel (`#name`) needs only its name;
@@ -43,6 +47,14 @@ pub struct ChannelReads {
 pub struct ChannelRead {
     pub name: String,
     pub through: Timestamp,
+}
+
+/// `PUT /api/v1/channels/scope`: the region a channel's messages are sent
+/// with from now on.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChannelScope {
+    pub name: String,
+    pub scope: crate::Scope,
 }
 
 /// `PUT /api/v1/channels/order`: channel names to list first, in this order.

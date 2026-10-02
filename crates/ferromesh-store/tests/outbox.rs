@@ -1,7 +1,7 @@
 //! Messages sent through a companion radio, and how their status follows
 //! what observers hear and what recipients acknowledge.
 
-use ferromesh_model::SendStatus;
+use ferromesh_model::{Scope, SendStatus};
 use ferromesh_store::{
     Acknowledgement, ObserverInfo, ObserverKind, Reception, SentMessage, SentTo, Store,
 };
@@ -35,6 +35,7 @@ fn sent(to: SentTo, body: &str, sender_timestamp: u32) -> SentMessage {
         body: body.into(),
         sender_timestamp,
         error: None,
+        scope: Some(Scope::Region("us-tn".into())),
     }
 }
 
@@ -52,6 +53,7 @@ fn channel_messages_are_heard_by_observers() {
     assert!(store.write(|batch| batch.record_sent(&message)).unwrap());
     assert!(!store.write(|batch| batch.record_sent(&message)).unwrap(), "stored once");
     let outbox = store.outbox(10, T0).unwrap();
+    assert_eq!(outbox[0].scope, Some(Scope::Region("us-tn".into())), "sent with a scope");
     assert_eq!(
         (outbox[0].status, outbox[0].heard, outbox[0].to.as_str()),
         (SendStatus::Sent, 0, "#test")

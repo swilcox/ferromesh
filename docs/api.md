@@ -48,6 +48,8 @@ POST /api/v1/channels/guess       # {"names": [...], "builtin": true, "mentions"
 POST /api/v1/channels             # {"name": "#wx"} or {"name": "...", "key": "..."}   (token)
 PUT  /api/v1/channels/order       # {"names": ["#test", "public", ...]}   (token)
 PUT  /api/v1/channels/read        # {"reads": [{"name": "#test", "through": "2026-10-02T17:24:01Z"}]}   (token)
+PUT  /api/v1/channels/scope       # {"name": "#test", "scope": {"region": "us-tn-bna"}}   (token)
+GET  /api/v1/scopes               # the regions the server's config offers
 ```
 
 Adding a channel backfills: stored traffic that was waiting for the key is decoded and appears in history. A new channel goes to the end of the list.
@@ -62,12 +64,14 @@ These need a companion radio on the server; without one they answer 503.
 
 ```
 GET  /api/v1/direct?limit=        # direct messages to the radio, newest first
-POST /api/v1/send                 # {"to": "#test" | "KK4SW" | "4d1727", "text": "..."}   (token)
+POST /api/v1/send                 # {"to": "#test" | "KK4SW" | "4d1727", "text": "...", "scope": ...}   (token)
 GET  /api/v1/outbox?limit=        # what was sent, with who heard it or whether it was acked
 POST /api/v1/advert               # {"flood": false}   (token)
 GET  /api/v1/contacts             # the radio's contacts
 POST /api/v1/contacts             # {"to": ..., "pinned": true}   (token)
 ```
+
+A scope keeps a flood send to a region (MeshCore's regions): `"default"` for the radio's own default, `"unscoped"` for none, or `{"region": "us-tn-bna"}`. Without one, a channel message goes with its channel's scope, and a direct message with the radio's default. Only floods carry a scope: a direct message to a node with a known route goes along that route. The outbox records each send's scope.
 
 `POST /api/v1/advert` makes the radio advertise itself, so other nodes can add it as a contact. It answers 201 with the radio's key and name; watch for the advert arriving by querying observations for `type:advert node:<key prefix>`. A flood advert is refused within a minute of the last one.
 

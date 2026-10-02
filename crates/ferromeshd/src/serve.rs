@@ -41,7 +41,8 @@ pub async fn run(config: Config) -> Result<()> {
         })
         .transpose()?;
     let mut state = AppState::new(config.db_path(), events.clone(), stopped)
-        .with_writer(jobs.clone(), config.api.token.clone());
+        .with_writer(jobs.clone(), config.api.token.clone())
+        .with_scopes(&config.scopes);
     if let Some(companion) = &companion {
         state = state.with_companion(companion.requests());
     }

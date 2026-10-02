@@ -3,6 +3,12 @@
 # Holds ferromesh.db and the raw/ log. In the container this is the /data volume.
 data_dir = "/data"
 
+# Regions (MeshCore's flood scopes) to offer when sending, and to name scoped
+# packets by in the inspector. Use your mesh's names, without '#'; these are
+# NashMesh's, from https://nashme.sh/getting-started/meshcore/#regions. A send
+# can also go unscoped ('*') or with the radio's own default region.
+# scopes = ["us", "us-southeast", "us-tn", "us-tn-middle", "us-tn-bna", "nashmesh"]
+
 # Where to record from: a broker, a companion radio, or both. At least one is
 # required. Delete this whole section to run from a companion radio alone.
 [mqtt]

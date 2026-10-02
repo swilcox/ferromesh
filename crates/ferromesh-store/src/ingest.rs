@@ -126,6 +126,8 @@ pub struct SentMessage {
     pub sender_timestamp: u32,
     /// Why the radio refused it; `None` if it was transmitted.
     pub error: Option<String>,
+    /// The region it was kept to; `None` for sends from before scopes.
+    pub scope: Option<ferromesh_model::Scope>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -365,8 +367,8 @@ impl<'a> Batch<'a> {
             .prepare_cached(
                 "INSERT INTO sent_messages (observer_id, sent_at, channel, recipient, recipient_name,
                                             body, sender_timestamp, packet_hash, expected_ack,
-                                            ack_timeout_ms, flood, error)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                                            ack_timeout_ms, flood, error, scope)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
                  ON CONFLICT (observer_id, sender_timestamp, body) DO NOTHING",
             )?
             .execute(params![
@@ -382,6 +384,7 @@ impl<'a> Batch<'a> {
                 timeout,
                 flood,
                 message.error,
+                message.scope.as_ref().map(ferromesh_model::Scope::label),
             ])?;
         Ok(inserted > 0)
     }

@@ -35,6 +35,7 @@ pub mod error;
 pub mod mention;
 pub mod packet;
 pub mod payload;
+pub mod scope;
 
 pub use advert::{Advert, AppData, Location, NodeRole};
 pub use channel::{Channel, ChannelKey, GroupText, Keyring, PUBLIC_CHANNEL_KEY, split_sender};

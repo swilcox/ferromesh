@@ -5,7 +5,7 @@
 use std::net::SocketAddr;
 
 use ed25519_dalek::{Signer, SigningKey};
-use ferromesh_model::{RadioContact, SendStatus, SentMessageInfo};
+use ferromesh_model::{RadioContact, Scope, SendStatus, SentMessageInfo};
 use ferromesh_store::{ChannelKind, Store};
 use ferromeshd::api::{self, AppState};
 use ferromeshd::companion::session::{Identity, Received};
@@ -94,7 +94,7 @@ fn fake_radio(requests: std::sync::mpsc::Receiver<Request>, jobs: mpsc::Sender<J
         // Like the real thread, stamp the send with the time it was sent.
         let now = Timestamp::now();
         let (record, reply, outcome) = match request {
-            Request::Channel { name, text, reply, .. } => {
+            Request::Channel { name, text, scope, reply, .. } => {
                 let hash = Packet::parse(&channel_frame(timestamp, &text)).unwrap().hash().0;
                 let record = record::sent_channel(
                     &identity,
@@ -104,11 +104,12 @@ fn fake_radio(requests: std::sync::mpsc::Receiver<Request>, jobs: mpsc::Sender<J
                     &text,
                     timestamp,
                     &hash,
+                    &scope,
                     None,
                 );
                 (record, reply, Ok(()))
             }
-            Request::Direct { contact, text, reply } => {
+            Request::Direct { contact, text, scope, reply } => {
                 if text.starts_with("refuse") {
                     let error = "the radio refused adding the contact: table full";
                     let record = record::sent_direct(
@@ -118,6 +119,7 @@ fn fake_radio(requests: std::sync::mpsc::Receiver<Request>, jobs: mpsc::Sender<J
                         &contact,
                         &text,
                         timestamp,
+                        &scope,
                         Err(error),
                     );
                     (record, reply, Err(error.to_owned()))
@@ -130,6 +132,7 @@ fn fake_radio(requests: std::sync::mpsc::Receiver<Request>, jobs: mpsc::Sender<J
                         &contact,
                         &text,
                         timestamp,
+                        &scope,
                         Ok(&sent),
                     );
                     (record, reply, Ok(()))
@@ -170,7 +173,8 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let mut state = AppState::new(db, events.clone(), stopped)
-            .with_writer(jobs.clone(), Some(TOKEN.into()));
+            .with_writer(jobs.clone(), Some(TOKEN.into()))
+            .with_scopes(&["us-tn".into(), "#nashmesh".into()]);
         if with_radio {
             let (requests, waiting) = std::sync::mpsc::channel();
             let radio_jobs = jobs.clone();
@@ -331,4 +335,32 @@ async fn contacts_are_listed_and_pinned() {
     assert_eq!(status, 200, "{body}");
     let listed: Vec<RadioContact> = serde_json::from_str(&body).unwrap();
     assert_eq!(listed, [pinned]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn channels_keep_a_scope_and_sends_may_override_it() {
+    let server = Server::start(true).await;
+    let (status, body) = server.request("GET", "/api/v1/scopes", None, "").await;
+    assert_eq!((status, body.as_str()), (200, r#"["us-tn","nashmesh"]"#), "named without #");
+
+    // A channel's scope is kept, and used when a send names none.
+    let scope = r##"{"name": "#test", "scope": {"region": "us-tn"}}"##;
+    assert_eq!(server.request("PUT", "/api/v1/channels/scope", None, scope).await.0, 401);
+    let (status, body) = server.request("PUT", "/api/v1/channels/scope", Some(TOKEN), scope).await;
+    assert_eq!(status, 204, "{body}");
+    let (_, body) = server.request("GET", "/api/v1/channels", None, "").await;
+    let channels: Vec<ferromesh_model::ChannelInfo> = serde_json::from_str(&body).unwrap();
+    let test = channels.iter().find(|channel| channel.name == "#test").unwrap();
+    assert_eq!(test.scope, Scope::Region("us-tn".into()));
+
+    let (status, body) = server.send("#test", "scoped").await;
+    assert_eq!(status, 201, "{body}");
+    let sent: SentMessageInfo = serde_json::from_str(&body).unwrap();
+    assert_eq!(sent.scope, Some(Scope::Region("us-tn".into())));
+
+    let body = r##"{"to": "#test", "text": "everywhere", "scope": "unscoped"}"##;
+    let (status, body) = server.request("POST", "/api/v1/send", Some(TOKEN), body).await;
+    assert_eq!(status, 201, "{body}");
+    let sent: SentMessageInfo = serde_json::from_str(&body).unwrap();
+    assert_eq!(sent.scope, Some(Scope::Unscoped));
 }

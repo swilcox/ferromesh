@@ -518,6 +518,7 @@ pub fn draw_channels(frame: &mut Frame, area: Rect, app: &App, screen: &mut Scre
                     Cell::from(Span::raw(format!("{:02x}", channel.hash)).dim()),
                     Cell::from(Line::from(channel.messages.to_string()).right_aligned()),
                     Cell::from(Line::from(last).right_aligned()),
+                    Cell::from(Span::raw(channel.scope.label().to_owned()).dim()),
                 ])
             })
             .collect();
@@ -527,8 +528,9 @@ pub fn draw_channels(frame: &mut Frame, area: Rect, app: &App, screen: &mut Scre
             Constraint::Length(4),
             Constraint::Length(8),
             Constraint::Length(12),
+            Constraint::Fill(1),
         ];
-        let header = header(&["name", "kind", "hash", "messages", "last message"]);
+        let header = header(&["name", "kind", "hash", "messages", "last message", "scope"]);
         let mut state = TableState::default()
             .with_selected(selected.filter(|_| !app.undecrypted_focus).map(|i| i - rows.start));
         let table = Table::new(body, widths).header(header).row_highlight_style(ui::highlight());

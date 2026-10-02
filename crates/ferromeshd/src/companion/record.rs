@@ -12,6 +12,7 @@
 //!   `login` what a room server or repeater said when asked to let it in.
 
 use anyhow::{Context, Result, bail};
+use ferromesh_model::Scope;
 use ferromesh_store::{
     Acknowledgement, DirectMessage, ObserverInfo, ObserverKind, Reception, SentMessage, SentTo,
 };
@@ -120,6 +121,7 @@ pub fn sent_channel(
     text: &str,
     sender_timestamp: u32,
     packet_hash: &[u8; 8],
+    scope: &Scope,
     error: Option<&str>,
 ) -> RawRecord {
     let payload = json!({
@@ -128,6 +130,7 @@ pub fn sent_channel(
         "text": text,
         "sender_timestamp": sender_timestamp,
         "packet_hash": hex::encode_upper(packet_hash),
+        "scope": scope.label(),
         "error": error,
     });
     record(identity, source, "sent", at, payload)
@@ -135,6 +138,7 @@ pub fn sent_channel(
 
 /// A direct message ferromesh asked the radio to send, with the radio's
 /// answer or why it wasn't sent.
+#[allow(clippy::too_many_arguments)]
 pub fn sent_direct(
     identity: &Identity,
     source: &str,
@@ -142,6 +146,7 @@ pub fn sent_direct(
     contact: &Contact,
     text: &str,
     sender_timestamp: u32,
+    scope: &Scope,
     result: Result<&Sent, &str>,
 ) -> RawRecord {
     let mut payload = json!({
@@ -150,6 +155,7 @@ pub fn sent_direct(
         "to_name": (!contact.name.is_empty()).then_some(&contact.name),
         "text": text,
         "sender_timestamp": sender_timestamp,
+        "scope": scope.label(),
     });
     match result {
         Ok(sent) => {
@@ -264,6 +270,7 @@ fn sent_message(
         body: text(fields, "text").context("no text")?,
         sender_timestamp: number("sender_timestamp").context("no sender timestamp")?,
         error: text(fields, "error"),
+        scope: text(fields, "scope").map(|scope| Scope::parse(&scope)),
     })
 }
 
@@ -370,14 +377,28 @@ mod tests {
         assert_eq!(report.raw, record.payload);
     }
 
+    fn us_tn() -> Scope {
+        Scope::Region("us-tn".into())
+    }
+
     #[test]
     fn sends_and_acknowledgements() {
-        let record =
-            sent_channel(&identity(), "companion:test", at(), "#test", "hi", 7, &[1; 8], None);
+        let record = sent_channel(
+            &identity(),
+            "companion:test",
+            at(),
+            "#test",
+            "hi",
+            7,
+            &[1; 8],
+            &us_tn(),
+            None,
+        );
         assert!(record.topic.ends_with("/sent"));
         let Message::Sent(sent) = parse(&record).unwrap() else { panic!() };
         assert_eq!(sent.to, SentTo::Channel { name: "#test".into(), packet_hash: [1; 8] });
         assert_eq!((sent.body.as_str(), sent.sender_timestamp, sent.error), ("hi", 7, None));
+        assert_eq!(sent.scope, Some(us_tn()));
 
         let contact = Contact {
             pubkey: [3; 32],
@@ -391,8 +412,16 @@ mod tests {
             lon_e6: 0,
         };
         let accepted = Sent { flood: true, expected_ack: 0xDEAD_BEEF, timeout_ms: 4000 };
-        let record =
-            sent_direct(&identity(), "companion:test", at(), &contact, "yo", 8, Ok(&accepted));
+        let record = sent_direct(
+            &identity(),
+            "companion:test",
+            at(),
+            &contact,
+            "yo",
+            8,
+            &Scope::Unscoped,
+            Ok(&accepted),
+        );
         let Message::Sent(sent) = parse(&record).unwrap() else { panic!() };
         assert_eq!(
             sent.to,
@@ -404,8 +433,17 @@ mod tests {
                 flood: Some(true),
             }
         );
-        let record =
-            sent_direct(&identity(), "companion:test", at(), &contact, "yo", 9, Err("table full"));
+        assert_eq!(sent.scope, Some(Scope::Unscoped));
+        let record = sent_direct(
+            &identity(),
+            "companion:test",
+            at(),
+            &contact,
+            "yo",
+            9,
+            &Scope::Default,
+            Err("table full"),
+        );
         let Message::Sent(sent) = parse(&record).unwrap() else { panic!() };
         assert_eq!(sent.error.as_deref(), Some("table full"));
 

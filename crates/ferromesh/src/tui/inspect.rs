@@ -3,6 +3,7 @@
 use std::ops::Range;
 
 use jiff::Timestamp;
+use meshcore_proto::scope::find_region;
 use meshcore_proto::{Packet, Payload, PayloadType};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -12,8 +13,9 @@ pub struct Field {
     pub value: String,
 }
 
-/// Labelled byte ranges that cover all of `frame`, in order.
-pub fn fields(frame: &[u8]) -> Vec<Field> {
+/// Labelled byte ranges that cover all of `frame`, in order. A scoped
+/// packet's region is named when it's one of `regions`.
+pub fn fields(frame: &[u8], regions: &[String]) -> Vec<Field> {
     let packet = match Packet::parse(frame) {
         Ok(packet) => packet,
         Err(error) => {
@@ -37,7 +39,10 @@ pub fn fields(frame: &[u8]) -> Vec<Field> {
         ),
     );
     if let Some([a, b]) = packet.transport_codes() {
-        out.take("transport", 4, format!("{a:04x} {b:04x}"));
+        let names = regions.iter().map(String::as_str);
+        let region = find_region(names, a, packet.payload_type().nibble(), packet.payload())
+            .map_or_else(|| "a region not configured".to_owned(), |name| format!("region {name}"));
+        out.take("transport", 4, format!("{a:04x} {b:04x} · {region}"));
     }
     let path = packet.path();
     let what = if packet.payload_type() == PayloadType::Trace { "SNR readings" } else { "hops" };
@@ -183,7 +188,7 @@ mod tests {
             &ChannelKey::from_hashtag("#test").encrypt(&text.to_plaintext()),
         ]
         .concat();
-        let fields = fields(&frame);
+        let fields = fields(&frame, &[]);
         assert_eq!(
             labels(&fields),
             ["header", "path length", "path", "channel", "mac", "ciphertext"]
@@ -197,7 +202,7 @@ mod tests {
     #[test]
     fn trace_with_transport_codes_style_header() {
         let frame = hex::decode("2601276AF0342431FB3ED301A6A6").unwrap();
-        let fields = fields(&frame);
+        let fields = fields(&frame, &[]);
         assert_eq!(
             labels(&fields),
             ["header", "path length", "path", "tag", "auth code", "flags", "route"]
@@ -217,7 +222,7 @@ mod tests {
         frame.extend((-86_800_000i32).to_le_bytes());
         frame.extend(b"Hilltop");
         frame[0] = 0x10; // transport flood ADVERT
-        let fields = fields(&frame);
+        let fields = fields(&frame, &[]);
         assert_eq!(
             labels(&fields),
             [
@@ -235,18 +240,29 @@ mod tests {
         assert_eq!(fields[6].value, "92, repeater");
         assert_eq!(fields[7].value, "36.10000, -86.80000");
         assert_eq!(fields[8].value, "Hilltop");
+        assert_eq!(fields[1].value, "1234 5678 · a region not configured");
         assert_covers(&fields, frame.len());
+
+        // Scoped to a configured region, which names it.
+        use meshcore_proto::scope::{region_key, transport_code};
+        let code = transport_code(&region_key("us-tn"), 4, &frame[6..]);
+        frame[1..3].copy_from_slice(&code.to_le_bytes());
+        let regions = ["us".to_owned(), "us-tn".to_owned()];
+        assert_eq!(
+            super::fields(&frame, &regions)[1].value,
+            format!("{code:04x} 5678 · region us-tn")
+        );
     }
 
     #[test]
     fn unparseable_and_truncated_frames() {
-        let fields = fields(&[0x09, 0xC1, 0x00]);
+        let fields = fields(&[0x09, 0xC1, 0x00], &[]);
         assert_eq!(labels(&fields), ["unparsed"]);
         assert_covers(&fields, 3);
 
         // An ACK too short for its checksum still covers every byte.
         let short = [0x0D, 0x00, 0x01];
-        let fields = super::fields(&short);
+        let fields = super::fields(&short, &[]);
         assert_covers(&fields, short.len());
     }
 }

@@ -22,9 +22,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use ferromesh_model::{
     AdvertRequest, AdvertSent, ChannelAdded, ChannelInfo, ChannelOrder, ChannelRead, ChannelReads,
-    DirectMessageInfo, Event, GuessChannels, GuessReport, HistoryQuery, Kind, MAX_NODES, NodeInfo,
-    ObserverHealth, PacketDetail, PinRequest, RadioContact, SendRequest, SentMessageInfo,
-    UnknownChannel,
+    ChannelScope, DirectMessageInfo, Event, GuessChannels, GuessReport, HistoryQuery, Kind,
+    MAX_NODES, NodeInfo, ObserverHealth, PacketDetail, PinRequest, RadioContact, SendRequest,
+    SentMessageInfo, UnknownChannel,
 };
 use futures_util::StreamExt;
 use jiff::Timestamp;
@@ -370,10 +370,21 @@ impl Network {
             Command::OrderChannels(names) => {
                 let _ = self.order.send(names);
             }
-            Command::Send { to, text } => {
+            Command::ChannelScope { name, scope } => {
                 let token = self.token.clone();
                 tokio::spawn(async move {
-                    let request = SendRequest { to: to.clone(), text };
+                    let request = ChannelScope { name: name.clone(), scope };
+                    let path = "/api/v1/channels/scope";
+                    if let Err(error) = server.put_empty(path, &request, token.as_deref()).await {
+                        let status = format!("couldn't keep {name}'s scope: {error:#}");
+                        let _ = updates.send(Update::Status(status));
+                    }
+                });
+            }
+            Command::Send { to, text, scope } => {
+                let token = self.token.clone();
+                tokio::spawn(async move {
+                    let request = SendRequest { to: to.clone(), text, scope };
                     let result: Result<SentMessageInfo> =
                         server.post("/api/v1/send", &request, token.as_deref()).await;
                     let status = match &result {
@@ -415,6 +426,9 @@ impl Network {
 
 async fn fetch_lists(server: &Server, updates: &UnboundedSender<Update>) {
     fetch_channels(server, updates).await;
+    if let Ok(scopes) = server.get::<Vec<String>>("/api/v1/scopes").await {
+        let _ = updates.send(Update::Scopes(scopes));
+    }
     let update =
         match server.get::<Vec<NodeInfo>>(&format!("/api/v1/nodes?limit={MAX_NODES}")).await {
             Ok(nodes) => Update::Nodes(nodes),

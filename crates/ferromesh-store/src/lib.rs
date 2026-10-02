@@ -250,6 +250,27 @@ impl Store {
         Ok(reads)
     }
 
+    /// The region a channel's messages are sent with; names that match no
+    /// channel are ignored.
+    pub fn set_channel_scope(&mut self, name: &str, scope: &ferromesh_model::Scope) -> Result<()> {
+        let stored = (*scope != ferromesh_model::Scope::Default).then(|| scope.label());
+        self.conn
+            .execute("UPDATE channels SET scope = ?2 WHERE name = ?1", params![name, stored])?;
+        Ok(())
+    }
+
+    /// Each channel's scope, where it isn't the radio's default.
+    pub fn channel_scopes(&self) -> Result<Vec<(String, ferromesh_model::Scope)>> {
+        let mut stmt =
+            self.conn.prepare("SELECT name, scope FROM channels WHERE scope IS NOT NULL")?;
+        let scopes = stmt
+            .query_map([], |row| {
+                Ok((row.get(0)?, ferromesh_model::Scope::parse(&row.get::<_, String>(1)?)))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(scopes)
+    }
+
     /// Channel names in list order.
     pub fn channel_order(&self) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare("SELECT name FROM channels ORDER BY position, id")?;

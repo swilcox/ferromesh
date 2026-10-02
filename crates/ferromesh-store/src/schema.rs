@@ -219,6 +219,14 @@ UPDATE channels SET position = id;
 -- A time rather than a message id, because a rebuild renumbers messages.
 ALTER TABLE channels ADD COLUMN read_through INTEGER NOT NULL DEFAULT 0;
 "#,
+    r#"
+-- The region a flood send is kept to: `*` for none, a region's name, or
+-- `default` (NULL on a channel) for the radio's own default. On a channel,
+-- what its messages are sent with unless a send says otherwise; on a sent
+-- message, what it went with, NULL for sends from before scopes.
+ALTER TABLE channels ADD COLUMN scope TEXT;
+ALTER TABLE sent_messages ADD COLUMN scope TEXT;
+"#,
 ];
 
 pub(crate) fn migrate(conn: &mut Connection) -> Result<()> {

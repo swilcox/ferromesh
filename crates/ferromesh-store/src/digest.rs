@@ -74,7 +74,7 @@ const CANONICAL: &[(&str, &str)] = &[
         "sent_messages",
         "SELECT o.pubkey, s.sent_at, s.channel, s.recipient, s.recipient_name, s.body,
                 s.sender_timestamp, s.packet_hash, s.expected_ack, s.ack_timeout_ms, s.flood,
-                s.error, s.acked_at, s.round_trip_ms
+                s.error, s.acked_at, s.round_trip_ms, s.scope
          FROM sent_messages s JOIN observers o ON o.id = s.observer_id
          ORDER BY o.pubkey, s.sender_timestamp, s.body",
     ),

@@ -27,6 +27,9 @@ pub struct Config {
     /// Room servers to join, so their posts arrive as messages.
     #[serde(default, rename = "room")]
     pub rooms: Vec<RoomConfig>,
+    /// Regions to offer when sending, and to name scoped packets by.
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

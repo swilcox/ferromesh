@@ -60,6 +60,7 @@ export FERROMESH_TOKEN=...
 ferromesh send '#test' hello from the terminal
 ferromesh send KK4SW are you there?           # by name, or a hex prefix of a key
 ferromesh send '#test' quick --follow 0       # don't wait around
+ferromesh send '#test' hi --scope us-tn-bna   # keep it to a region; '*' for none
 ```
 
 `send` follows the message for 20 seconds by default. For a channel message it shows who heard it: ferromesh knows the exact packet the radio will transmit, so every observer's reception of it counts, including your repeater hearing your own radio. For a direct message it shows whether the recipient acknowledged it, and how long the round trip took. Either way the send is kept in the outbox (`GET /api/v1/outbox`).
@@ -144,7 +145,7 @@ What you've read is kept on the server, per channel, so unread counts carry over
 Keys:
 
 - `Tab` moves between the list and the messages or conversation beside it; in the other tabs it switches what they show, or between the watches and alerts.
-- `c` writes to the channel or person shown (needs the token). `n` starts a conversation with anyone, by name or the start of their key; `m` does the same for whoever is selected in Nodes, or the sender of the selected message.
+- `c` writes to the channel or person shown (needs the token). The compose line shows the scope the message goes with; `Tab` steps through the radio's default, `*` (none) and the regions in the server's `scopes`, and `Shift-Tab` goes back. A channel keeps the scope you last sent with, for every client; direct messages keep theirs for the session. `n` starts a conversation with anyone, by name or the start of their key; `m` does the same for whoever is selected in Nodes, or the sender of the selected message.
 - `r` replies to the selected channel message, on the channel it arrived on and naming its sender.
 - `p` in Nodes keeps the selected node on the radio, adding it as a contact if needed, or lets a kept one go (needs the token).
 - `a` advertises the radio: `l` to its neighbours, `f` across the mesh (needs the token).

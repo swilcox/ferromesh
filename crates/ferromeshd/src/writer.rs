@@ -35,6 +35,12 @@ pub enum Job {
         reads: Vec<(String, ferromesh_store::Micros)>,
         reply: oneshot::Sender<ferromesh_store::Result<()>>,
     },
+    /// Send a channel's messages with this scope from now on.
+    ChannelScope {
+        name: String,
+        scope: ferromesh_model::Scope,
+        reply: oneshot::Sender<ferromesh_store::Result<()>>,
+    },
     /// Replies once every earlier job is done.
     Sync(oneshot::Sender<()>),
 }
@@ -95,6 +101,9 @@ impl Writer {
             }
             Job::MarkRead { reads, reply } => {
                 let _ = reply.send(self.store.mark_channels_read(&reads));
+            }
+            Job::ChannelScope { name, scope, reply } => {
+                let _ = reply.send(self.store.set_channel_scope(&name, &scope));
             }
             Job::Sync(reply) => {
                 self.flush()?;

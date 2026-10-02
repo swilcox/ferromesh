@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use ferromesh_model::{Filter, GuessChannels, Kind};
+use ferromesh_model::{Filter, GuessChannels, Kind, Scope};
 
 use crate::config::Settings;
 use crate::render::Printer;
@@ -108,6 +108,11 @@ enum Command {
         /// Seconds to follow the message afterwards; 0 returns at once.
         #[arg(long, default_value_t = 20)]
         follow: u64,
+        /// The region to keep it to: a region's name, '*' for none, or
+        /// 'default' for the radio's own. Without it, a channel message
+        /// takes the channel's scope.
+        #[arg(long)]
+        scope: Option<String>,
     },
     /// Advertise the server's companion radio, so other nodes can add it as
     /// a contact, then watch which observers hear it.
@@ -274,8 +279,9 @@ async fn run(cli: Cli) -> Result<()> {
             let window = (since.map(When::at), until.map(When::at));
             server::query(&server, kind, filter, limit, window, Printer::new(json)).await
         }
-        Command::Send { to, text, follow } => {
-            send::send(&server, to, text.join(" "), token, Duration::from_secs(follow)).await
+        Command::Send { to, text, follow, scope } => {
+            let scope = scope.as_deref().map(Scope::parse);
+            send::send(&server, to, text.join(" "), scope, token, Duration::from_secs(follow)).await
         }
         Command::Advert { flood, follow } => {
             advert::advert(&server, flood, token, Duration::from_secs(follow)).await

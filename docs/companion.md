@@ -23,7 +23,7 @@ In Docker, pass the port through with a `compose.override.yaml`; see [running.md
 
 **Takes direct messages.** Messages addressed to the radio are decrypted on the radio — its private key never leaves it — and stored. `ferromesh dms` lists them, and the TUI's DMs view (`2`) shows each conversation, where `c` replies.
 
-**Sends.** `ferromesh send`, `POST /api/v1/send`, and `c` in the TUI all go out through it. Sending to a channel gives that channel one of the radio's 40 slots the first time. Sending to a node adds that node to the radio's contacts from its advert.
+**Sends.** `ferromesh send`, `POST /api/v1/send`, and `c` in the TUI all go out through it. Sending to a channel gives that channel one of the radio's 40 slots the first time. Sending to a node adds that node to the radio's contacts from its advert. Each send sets the radio's flood scope first (a region, none, or the radio's default), since the radio keeps whatever scope it was last given; adverts keep the radio's own default.
 
 **Advertises itself.** `ferromesh advert` (or `a` in the TUI) tells the radio to announce itself, so other nodes can add it as a contact; `--flood` carries it across the mesh instead of only to the radios that hear it directly.
 

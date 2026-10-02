@@ -1,7 +1,7 @@
 //! Node listings, single-packet detail, direct messages and the outbox.
 
 use ferromesh_model::{
-    DirectMessageInfo, Event, Kind, NodeInfo, PacketDetail, PacketReception, SendStatus,
+    DirectMessageInfo, Event, Kind, NodeInfo, PacketDetail, PacketReception, Scope, SendStatus,
     SentMessageInfo,
 };
 use jiff::Timestamp;
@@ -234,7 +234,7 @@ pub(crate) fn outbox(conn: &Connection, limit: usize, now: Micros) -> Result<Vec
                  FROM packets p JOIN observations x ON x.packet_id = p.id
                  JOIN observers b ON b.id = x.observer_id
                  WHERE p.hash = s.packet_hash),
-                s.sender_timestamp
+                s.sender_timestamp, s.scope
          FROM sent_messages s JOIN observers o ON o.id = s.observer_id
          ORDER BY s.sent_at DESC, s.id DESC
          LIMIT ?1",
@@ -277,6 +277,7 @@ pub(crate) fn outbox(conn: &Connection, limit: usize, now: Micros) -> Result<Vec
                     .map(|names| names.split(',').map(str::to_owned).collect())
                     .unwrap_or_default(),
                 packet_hash: packet_hash.map(hex::encode_upper),
+                scope: row.get::<_, Option<String>>(14)?.map(|scope| Scope::parse(&scope)),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

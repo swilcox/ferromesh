@@ -137,7 +137,7 @@ fn detail_lines(app: &App, detail: &PacketDetail) -> Vec<Line<'static>> {
             .bold(),
     );
     let trace = packet.payload_type == "TRACE";
-    for (index, field) in inspect::fields(&frame).into_iter().enumerate() {
+    for (index, field) in inspect::fields(&frame, &app.scopes).into_iter().enumerate() {
         let color = FIELD_COLORS[index % FIELD_COLORS.len()];
         let value = if field.label == "path" && !trace {
             named_path(app, &field.value)

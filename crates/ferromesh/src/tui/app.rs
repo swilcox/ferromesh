@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ferromesh_model::{
     AddChannel, ChannelInfo, DirectMessageInfo, Event, Filter, FilterError, Guess, GuessReport,
-    Kind, MessageEvent, NodeInfo, ObserverHealth, PacketDetail, RadioContact, SendStatus,
+    Kind, MessageEvent, NodeInfo, ObserverHealth, PacketDetail, RadioContact, Scope, SendStatus,
     SentMessageInfo, UnknownChannel,
 };
 use jiff::Timestamp;
@@ -215,6 +215,8 @@ pub struct DmLine {
     pub status: Option<SendStatus>,
     pub round_trip_ms: Option<u32>,
     pub error: Option<String>,
+    /// The region a sent message was kept to.
+    pub scope: Option<Scope>,
 }
 
 /// Everything exchanged with one node, oldest first.
@@ -343,6 +345,12 @@ pub enum Command {
     Send {
         to: String,
         text: String,
+        scope: Option<Scope>,
+    },
+    /// Send a channel's messages with this scope from now on.
+    ChannelScope {
+        name: String,
+        scope: Scope,
     },
     /// Advertise the server's companion radio.
     Advert {
@@ -386,6 +394,8 @@ pub enum Update {
     Undecrypted(Result<Vec<UnknownChannel>, String>),
     /// Names that open undecrypted traffic, or why guessing failed.
     Guessed(Result<GuessReport, String>),
+    /// The regions the server offers for sending.
+    Scopes(Vec<String>),
     Detail(String, Result<PacketDetail, String>),
     Older {
         kind: Kind,
@@ -425,6 +435,13 @@ pub struct App {
     /// selected channel or conversation: replying goes to the message's own
     /// channel, whatever the sidebar shows.
     compose_to: Option<String>,
+    /// The scope picked on the open compose line; `None` keeps the
+    /// target's own.
+    compose_scope: Option<Scope>,
+    /// The scope direct messages go with, as last picked.
+    pub dm_scope: Scope,
+    /// The regions the server offers, named without `#`.
+    pub scopes: Vec<String>,
     /// The radio's contacts, or why they couldn't be fetched.
     pub contacts: Result<Vec<RadioContact>, String>,
     /// The nodes view lists only the radio's contacts.
@@ -499,6 +516,9 @@ impl App {
             correspondent: None,
             dm_scroll: 0,
             compose_to: None,
+            compose_scope: None,
+            dm_scope: Scope::Default,
+            scopes: Vec::new(),
             contacts: Ok(Vec::new()),
             radio_only: false,
             tab_views: TABS.map(|(_, views)| views[0]),
@@ -776,6 +796,7 @@ impl App {
                 status: None,
                 round_trip_ms: None,
                 error: None,
+                scope: None,
             });
         }
         for sent in self.sent_dms.iter().filter(|sent| sent.direct) {
@@ -789,6 +810,7 @@ impl App {
                 status: Some(sent.status),
                 round_trip_ms: sent.round_trip_ms,
                 error: sent.error.clone(),
+                scope: sent.scope.clone(),
             });
         }
         let mut conversations: Vec<Conversation> = threads
@@ -891,6 +913,37 @@ impl App {
             }
             _ => self.channel.clone(),
         }
+    }
+
+    /// The scope the open compose line sends with: the one picked with Tab,
+    /// or else the channel's own, or for a direct message the last used.
+    pub fn compose_scope(&self) -> Scope {
+        if let Some(scope) = &self.compose_scope {
+            return scope.clone();
+        }
+        let target = self.compose_target();
+        match self.channels.iter().find(|channel| Some(&channel.name) == target.as_ref()) {
+            Some(channel) => channel.scope.clone(),
+            None => self.dm_scope.clone(),
+        }
+    }
+
+    /// Steps the compose line's scope through the radio's default, none,
+    /// then each region the server offers.
+    fn cycle_scope(&mut self, forward: bool) {
+        let mut choices = vec![Scope::Default, Scope::Unscoped];
+        choices.extend(self.scopes.iter().map(|name| Scope::Region(name.clone())));
+        let current = self.compose_scope();
+        if !choices.contains(&current) {
+            choices.push(current.clone());
+        }
+        let at = choices.iter().position(|scope| *scope == current).unwrap_or(0);
+        let next = if forward {
+            (at + 1) % choices.len()
+        } else {
+            (at + choices.len() - 1) % choices.len()
+        };
+        self.compose_scope = Some(choices[next].clone());
     }
 
     /// The radio's contacts, favourites first and then the most recently
@@ -1171,6 +1224,7 @@ impl App {
                 }
                 self.undecrypted = Some(result);
             }
+            Update::Scopes(scopes) => self.scopes = scopes,
             Update::Guessed(result) => {
                 self.guessing = false;
                 match result {
@@ -1693,10 +1747,15 @@ impl App {
                 _ => {}
             }
         }
+        if input.prompt == Prompt::Compose && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) {
+            self.cycle_scope(key.code == KeyCode::Tab);
+            return Vec::new();
+        }
         match key.code {
             KeyCode::Esc => {
                 self.input = None;
                 self.compose_to = None;
+                self.compose_scope = None;
             }
             KeyCode::Enter => return self.submit(),
             KeyCode::Backspace => {
@@ -1742,7 +1801,9 @@ impl App {
         let Some(input) = self.input.take() else {
             return Vec::new();
         };
+        let scope = self.compose_scope();
         let composed_to = self.compose_to.take();
+        self.compose_scope = None;
         let text = input.text.trim().to_owned();
         let kind = self.view.kind();
         match input.prompt {
@@ -1785,7 +1846,19 @@ impl App {
                     return Vec::new();
                 }
                 self.status = Some(format!("sending to {to}…"));
-                vec![Command::Send { to, text }]
+                let mut commands =
+                    vec![Command::Send { to: to.clone(), text, scope: Some(scope.clone()) }];
+                // What was picked becomes the channel's scope, or for direct
+                // messages the next one's.
+                match self.channels.iter_mut().find(|channel| channel.name == to) {
+                    Some(channel) if channel.scope != scope => {
+                        channel.scope = scope.clone();
+                        commands.push(Command::ChannelScope { name: to, scope });
+                    }
+                    Some(_) => {}
+                    None => self.dm_scope = scope,
+                }
+                commands
             }
             Prompt::Filter => {
                 if text.is_empty() {
@@ -2257,7 +2330,11 @@ mod tests {
         type_text(&mut app, "hello mesh");
         assert_eq!(
             press(&mut app, KeyCode::Enter),
-            [Command::Send { to: "#test".into(), text: "hello mesh".into() }]
+            [Command::Send {
+                to: "#test".into(),
+                text: "hello mesh".into(),
+                scope: Some(Scope::Default)
+            }]
         );
         assert_eq!(app.status.as_deref(), Some("sending to #test…"));
 
@@ -2295,7 +2372,11 @@ mod tests {
         assert!(app.input.as_ref().unwrap().suggestions().is_empty(), "put away");
         assert_eq!(
             press(&mut app, KeyCode::Enter),
-            [Command::Send { to: "#test".into(), text: "at 12:30 :sm".into() }]
+            [Command::Send {
+                to: "#test".into(),
+                text: "at 12:30 :sm".into(),
+                scope: Some(Scope::Default)
+            }]
         );
     }
 
@@ -2401,6 +2482,7 @@ mod tests {
             last_message_at: None,
             read_through: None,
             unread: 0,
+            scope: Scope::Default,
         }]));
         assert!(app.guesses_for(0x12).is_empty());
         assert_eq!(app.undecrypted_list()[0].hash, 0x81);
@@ -2423,6 +2505,7 @@ mod tests {
             last_message_at: last.map(|second| Timestamp::from_second(second).unwrap()),
             read_through: None,
             unread: 0,
+            scope: Scope::Default,
         }
     }
 

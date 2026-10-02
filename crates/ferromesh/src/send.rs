@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ferromesh_model::{OutboxQuery, SendRequest, SendStatus, SentMessageInfo};
+use ferromesh_model::{OutboxQuery, Scope, SendRequest, SendStatus, SentMessageInfo};
 
 use crate::channels::local;
 use crate::server::Server;
@@ -15,12 +15,18 @@ pub async fn send(
     server: &Server,
     to: String,
     text: String,
+    scope: Option<Scope>,
     token: Option<&str>,
     follow: Duration,
 ) -> Result<()> {
     let sent: SentMessageInfo =
-        server.post("/api/v1/send", &SendRequest { to, text }, token).await?;
-    println!("sent to {} as {} at {}", sent.to, sent.from, local(sent.sent_at));
+        server.post("/api/v1/send", &SendRequest { to, text, scope }, token).await?;
+    let scoped = match &sent.scope {
+        Some(Scope::Region(name)) => format!(", kept to {name}"),
+        Some(Scope::Unscoped) => ", unscoped".to_owned(),
+        _ => String::new(),
+    };
+    println!("sent to {} as {} at {}{scoped}", sent.to, sent.from, local(sent.sent_at));
     let mut last = progress(&sent);
     println!("  {last}");
 
@@ -91,6 +97,7 @@ mod tests {
             heard: 3,
             heard_by: vec!["Tanyard".into(), "scw".into()],
             packet_hash: None,
+            scope: None,
         }
     }
 

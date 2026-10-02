@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use ferromesh_model::{
     Advert, ChannelInfo, DecodeState, Event, Filter, GuessChannels, GuessReport, Kind,
-    MessageEvent, ObservationEvent, PacketEvent, UnknownChannel,
+    MessageEvent, ObservationEvent, PacketEvent, Scope, UnknownChannel,
 };
 use jiff::Timestamp;
 use meshcore_proto::{Header, NodeRole, PayloadType};
@@ -251,7 +251,8 @@ pub(crate) fn events(conn: &Connection, kind: Kind, ids: &[i64]) -> Result<Vec<E
 pub(crate) fn channel_infos(conn: &Connection, id: Option<i64>) -> Result<Vec<ChannelInfo>> {
     let mut stmt = conn.prepare_cached(
         "SELECT c.name, c.kind, c.hash, c.enabled, c.added_at, count(m.id), max(m.first_seen_at),
-                c.read_through, count(m.id) FILTER (WHERE m.first_seen_at > c.read_through)
+                c.read_through, count(m.id) FILTER (WHERE m.first_seen_at > c.read_through),
+                c.scope
          FROM channels c
          LEFT JOIN messages m ON m.channel_id = c.id
          WHERE ?1 IS NULL OR c.id = ?1
@@ -270,6 +271,10 @@ pub(crate) fn channel_infos(conn: &Connection, id: Option<i64>) -> Result<Vec<Ch
                 last_message_at: optional_timestamp(row, 6)?,
                 read_through: optional_timestamp(row, 7)?.filter(|at| *at != Timestamp::UNIX_EPOCH),
                 unread: row.get(8)?,
+                scope: row
+                    .get::<_, Option<String>>(9)?
+                    .map(|s| Scope::parse(&s))
+                    .unwrap_or_default(),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
