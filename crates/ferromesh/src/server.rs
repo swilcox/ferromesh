@@ -72,6 +72,22 @@ impl Server {
         self.send(reqwest::Method::PUT, path, body, token).await
     }
 
+    /// A PUT whose reply has no body.
+    pub async fn put_empty<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+        token: Option<&str>,
+    ) -> Result<()> {
+        let response = self.request(reqwest::Method::PUT, path, body, token).await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("{}", error_message(status.as_u16(), &body));
+        }
+        Ok(())
+    }
+
     async fn send<B: Serialize, T: DeserializeOwned>(
         &self,
         method: reqwest::Method,
@@ -79,14 +95,22 @@ impl Server {
         body: &B,
         token: Option<&str>,
     ) -> Result<T> {
+        decode(self.request(method, path, body, token).await?).await
+    }
+
+    async fn request<B: Serialize>(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: &B,
+        token: Option<&str>,
+    ) -> Result<reqwest::Response> {
         let url = format!("{}{path}", self.base);
         let mut request = reqwest::Client::new().request(method, url).json(body);
         if let Some(token) = token {
             request = request.bearer_auth(token);
         }
-        let response =
-            request.send().await.with_context(|| format!("can't reach {}", self.base))?;
-        decode(response).await
+        request.send().await.with_context(|| format!("can't reach {}", self.base))
     }
 
     /// `path?query`, URL-encoded.

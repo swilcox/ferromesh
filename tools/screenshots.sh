@@ -42,5 +42,5 @@ shoot() { # name, keys, size
         --keys "$2" --size "$3" > "docs/screenshots/$1.svg"
 }
 shoot messages 1 120x36
-shoot rf 4 120x36
-shoot health 7 120x25
+shoot rf "4<tab>" 120x36
+shoot health 5 120x25

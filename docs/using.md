@@ -129,33 +129,30 @@ Hashtag channels derive their key from the name, which is why guessing works; pr
 ferromesh tui
 ```
 
-Nine views, switched with `1` to `9`:
+Five tabs, switched with `1` to `5`:
 
 | | |
 |---|---|
-| **1 Messages** | A channel list with unread counts, and each message once with how many times it was heard |
-| **2 DMs** | Direct messages, as a conversation per person: what they sent, what you sent, and whether it was acknowledged. `n` starts one with anyone |
-| **3 Packets** | Every distinct packet, decoded where possible |
-| **4 RF** | Every reception, with signal strength and path, naming repeaters where a hop prefix identifies one |
-| **5 Nodes** | Every node that has advertised |
-| **6 Alerts** | Your watches, and new traffic that matched them |
-| **7 Health** | Each observer's battery, noise floor, traffic and delivery, with trends and warnings |
-| **8 Contacts** | The companion radio's own contact list, favourites first, marking the one it would replace next |
-| **9 Channels** | The channels the server decrypts, and below them the channel hashes on stored traffic that no known key opens, with any names a guess found |
+| **1 Messages** | One list of every channel with its unread count, then rooms and people; beside it, the selected channel's messages (each once, with how many times it was heard) or the conversation with that person: what they sent, what you sent, and whether it was acknowledged. `e` switches to organizing channels: the full channel list, and below it the channel hashes on stored traffic that no known key opens, with any names a guess found |
+| **2 Alerts** | Your watches, and new traffic that matched them |
+| **3 Nodes** | Every node that has advertised, with what the companion radio holds of each: kept, on the radio, or the contact it would replace next. `Tab` shows only the radio's contacts, in its own order |
+| **4 Traffic** | Every distinct packet, decoded where possible; `Tab` switches to every reception, with signal strength and path, naming repeaters where a hop prefix identifies one |
+| **5 Health** | Each observer's battery, noise floor, traffic and delivery, with trends and warnings |
+
+What you've read is kept on the server, per channel, so unread counts carry over from one session to the next and between machines (needs the token). Messages that arrived since you last read a channel stay marked for the whole session, even once read: a `•` beside them across all channels, and a "new since you started" line above the first of them in one channel. `x` clears those marks.
 
 Keys:
 
-- `c` composes: a message to the selected channel, a reply in the conversation the DM view is showing, or a message to the selected contact (needs the token).
-- `Tab` moves between the channel list and the feed, the people list and the conversation in DMs, or the channels and the undecrypted traffic in Channels.
-- `p` keeps a contact on the radio, or lets it go again; in the Nodes view it adds the selected node as a kept contact (needs the token).
-- `n` in the DM view starts a conversation with anyone, by name or the start of their key; `m` in the Nodes, Contacts or Messages view does the same for whoever is selected — in Messages, that's the sender of the selected message.
+- `Tab` moves between the list and the messages or conversation beside it; in the other tabs it switches what they show, or between the watches and alerts.
+- `c` writes to the channel or person shown (needs the token). `n` starts a conversation with anyone, by name or the start of their key; `m` does the same for whoever is selected in Nodes, or the sender of the selected message.
 - `r` replies to the selected channel message, on the channel it arrived on and naming its sender.
+- `p` in Nodes keeps the selected node on the radio, adding it as a contact if needed, or lets a kept one go (needs the token).
 - `a` advertises the radio: `l` to its neighbours, `f` across the mesh (needs the token).
-- `+` adds a channel, in the Messages or Channels view: `#name` for a hashtag channel, or a name followed by its key in hex or base64. Stored traffic it opens is decrypted too (needs the token).
-- `J` and `K` move the selected channel down and up, and `T` sends it to the top, in the Channels view or the Messages view's channel list. The order is kept on the server, so every client sees it (needs the token).
-- `o` in the Messages or Channels view sorts the channel lists: your order, most messages, or most recent message. Channels move only in your order.
-- `s` in the Channels view guesses names for undecrypted traffic: any you type, common ones, and hashtags mentioned in messages. Hashes a name opens move to the top of the list, and `+` on one offers that name.
-- `Enter` in the Channels view reads the selected channel in Messages; elsewhere it opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field.
+- `J` and `K` move the selected channel down and up, and `T` sends it to the top, in the channel list or when organizing. The order is kept on the server, so every client sees it (needs the token).
+- `o` sorts the channel lists: your order, most messages, or most recent message. Channels move only in your order.
+- `+` adds a channel: `#name` for a hashtag channel, or a name followed by its key in hex or base64. Stored traffic it opens is decrypted too (needs the token).
+- `s`, when organizing, guesses names for undecrypted traffic: any you type, common ones, and hashtags mentioned in messages. Hashes a name opens move to the top of the list, and `+` on one offers that name.
+- `Enter`, when organizing, reads the selected channel; elsewhere it opens the inspector on the selected packet: each reception's signal and path, and the frame's bytes labelled field by field.
 - `/` filters the current view, with the filter language above.
 - `w` saves the current filter as a watch. Matching traffic is highlighted, and new matches ring the bell and land in Alerts.
 - Scrolling past the oldest row loads older history from the server.
@@ -166,7 +163,7 @@ Watches are kept in `~/.config/ferromesh/watches.toml`.
 For scripting or a screenshot, the TUI can render one screen as plain text and exit:
 
 ```sh
-ferromesh tui --snapshot --size 120x40 --keys '4<enter>'
+ferromesh tui --snapshot --size 120x40 --keys '4<tab><enter>'
 ```
 
 `--svg` draws it as a picture of a terminal instead, colours and all; that's how the README's screenshots are made (`tools/screenshots.sh`, from invented traffic).

@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ferromesh_model::{
     AddChannel, ChannelInfo, DirectMessageInfo, Event, Filter, FilterError, Guess, GuessReport,
-    Kind, NodeInfo, ObserverHealth, PacketDetail, RadioContact, SendStatus, SentMessageInfo,
-    UnknownChannel,
+    Kind, MessageEvent, NodeInfo, ObserverHealth, PacketDetail, RadioContact, SendStatus,
+    SentMessageInfo, UnknownChannel,
 };
 use jiff::Timestamp;
 use jiff::tz::TimeZone;
@@ -27,46 +27,51 @@ const ALERT_CAP: usize = 500;
 /// Rows a page key moves.
 const PAGE: isize = 10;
 
+/// What the screen shows. Each belongs to one of the [`TABS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum View {
+    /// A channel's messages, or every channel's.
     Messages,
+    /// One conversation, picked from the same list as the channels.
     Dms,
-    Packets,
-    Rf,
-    Nodes,
-    Alerts,
-    Health,
-    /// The companion radio's own contact list.
-    Contacts,
-    /// The channels the server decrypts, and traffic no key opens yet.
+    /// Organizing channels: the full list, and traffic no key opens yet.
     Channels,
+    Alerts,
+    /// Every node heard, and the radio's contacts among them.
+    Nodes,
+    /// Each distinct packet.
+    Packets,
+    /// Each reception of a packet.
+    Rf,
+    Health,
 }
 
-impl View {
-    pub const ALL: [Self; 9] = [
-        Self::Messages,
-        Self::Dms,
-        Self::Packets,
-        Self::Rf,
-        Self::Nodes,
-        Self::Alerts,
-        Self::Health,
-        Self::Contacts,
-        Self::Channels,
-    ];
+/// The tabs along the top, each with the views it switches between.
+pub const TABS: [(&str, &[View]); 5] = [
+    ("Messages", &[View::Messages, View::Dms, View::Channels]),
+    ("Alerts", &[View::Alerts]),
+    ("Nodes", &[View::Nodes]),
+    ("Traffic", &[View::Packets, View::Rf]),
+    ("Health", &[View::Health]),
+];
 
+impl View {
     pub const fn title(self) -> &'static str {
         match self {
             Self::Messages => "Messages",
             Self::Dms => "DMs",
-            Self::Packets => "Packets",
-            Self::Rf => "RF",
-            Self::Nodes => "Nodes",
-            Self::Alerts => "Alerts",
-            Self::Health => "Health",
-            Self::Contacts => "Contacts",
             Self::Channels => "Channels",
+            Self::Alerts => "Alerts",
+            Self::Nodes => "Nodes",
+            Self::Packets => "Packets",
+            Self::Rf => "Receptions",
+            Self::Health => "Health",
         }
+    }
+
+    /// Which of the [`TABS`] it belongs to.
+    pub fn tab(self) -> usize {
+        TABS.iter().position(|(_, views)| views.contains(&self)).unwrap_or(0)
     }
 
     /// The kind of event the view lists, if it lists events.
@@ -75,13 +80,47 @@ impl View {
             Self::Messages => Some(Kind::Messages),
             Self::Packets => Some(Kind::Packets),
             Self::Rf => Some(Kind::Observations),
-            Self::Dms
-            | Self::Nodes
-            | Self::Alerts
-            | Self::Health
-            | Self::Contacts
-            | Self::Channels => None,
+            Self::Dms | Self::Channels | Self::Alerts | Self::Nodes | Self::Health => None,
         }
+    }
+}
+
+/// An entry in the list beside the messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    /// Every channel at once.
+    All,
+    Channel(String),
+    /// A conversation with a room server, whose posts are by its members.
+    Room(String),
+    Person(String),
+}
+
+/// A row of the nodes view: a node heard advertising, a contact on the
+/// radio, or both.
+#[derive(Debug, Clone, Copy)]
+pub struct NodeRow<'a> {
+    pub pubkey: &'a str,
+    pub node: Option<&'a NodeInfo>,
+    pub contact: Option<&'a RadioContact>,
+}
+
+impl NodeRow<'_> {
+    pub fn name(&self) -> Option<&str> {
+        self.node
+            .and_then(|node| node.name.as_deref())
+            .or(self.contact.map(|contact| contact.name.as_str()))
+    }
+
+    pub fn role(&self) -> Option<&str> {
+        self.node
+            .and_then(|node| node.role.as_deref())
+            .or(self.contact.map(|contact| contact.kind.as_str()))
+    }
+
+    /// How to address it: its name, or the start of its key.
+    pub fn label(&self) -> String {
+        self.name().map_or_else(|| self.pubkey[..12].to_owned(), str::to_owned)
     }
 }
 
@@ -388,7 +427,10 @@ pub struct App {
     compose_to: Option<String>,
     /// The radio's contacts, or why they couldn't be fetched.
     pub contacts: Result<Vec<RadioContact>, String>,
-    pub contact_selected: usize,
+    /// The nodes view lists only the radio's contacts.
+    pub radio_only: bool,
+    /// The view each tab last showed.
+    tab_views: [View; TABS.len()],
     /// Node names by lowercase public-key prefix of 1–3 bytes, `None` where
     /// the prefix is ambiguous or the node unnamed.
     hop_names: HashMap<String, Option<String>>,
@@ -426,7 +468,12 @@ pub struct App {
     /// Receptions seen per packet hash, to keep heard counts current.
     heard: HashMap<String, i64>,
     /// Per channel, the newest message id counted as read.
-    last_read: HashMap<String, i64>,
+    last_read: HashMap<String, Timestamp>,
+    /// Per channel, how far it had been read when the TUI started: later
+    /// messages are marked as new for the session, even once read.
+    arrived: Option<HashMap<String, Timestamp>>,
+    /// Read marks to send to the server.
+    reads_out: HashMap<String, Timestamp>,
     pub input: Option<Input>,
     pub inspector: Option<Inspector>,
     pub help: bool,
@@ -453,7 +500,8 @@ impl App {
             dm_scroll: 0,
             compose_to: None,
             contacts: Ok(Vec::new()),
-            contact_selected: 0,
+            radio_only: false,
+            tab_views: TABS.map(|(_, views)| views[0]),
             hop_names: HashMap::new(),
             channel: None,
             channel_selected: 0,
@@ -478,6 +526,8 @@ impl App {
             watched: HashSet::new(),
             heard: HashMap::new(),
             last_read: HashMap::new(),
+            arrived: None,
+            reads_out: HashMap::new(),
             input: None,
             inspector: None,
             help: false,
@@ -525,17 +575,58 @@ impl App {
         stored.max(self.heard.get(hash).copied().unwrap_or(0))
     }
 
-    /// Messages not yet shown, per channel.
+    /// Messages not yet read, per channel: those held after the channel's
+    /// read mark, or the server's count when it reaches further back than
+    /// the feed and nothing has been read since it was counted.
     pub fn unread(&self) -> HashMap<&str, usize> {
-        let mut counts = HashMap::new();
+        let mut counts: HashMap<&str, usize> = HashMap::new();
         for event in self.feeds[slot(Kind::Messages)].events.values() {
             if let Event::Message(message) = event
-                && message.id > self.last_read.get(&message.channel).copied().unwrap_or(0)
+                && self
+                    .last_read
+                    .get(&message.channel)
+                    .is_none_or(|read| message.first_seen_at > *read)
             {
                 *counts.entry(message.channel.as_str()).or_default() += 1;
             }
         }
+        for channel in &self.channels {
+            let counted_from = channel.read_through.unwrap_or(Timestamp::UNIX_EPOCH);
+            let read_since =
+                self.last_read.get(&channel.name).is_some_and(|read| *read > counted_from);
+            if !read_since && channel.unread > 0 {
+                let count = counts.entry(channel.name.as_str()).or_default();
+                *count = (*count).max(channel.unread as usize);
+            }
+        }
+        counts.retain(|_, count| *count > 0);
         counts
+    }
+
+    /// Whether `message` arrived after its channel had been read when the
+    /// TUI started.
+    pub fn is_new(&self, message: &MessageEvent) -> bool {
+        self.arrived.as_ref().is_some_and(|arrived| {
+            arrived.get(&message.channel).is_some_and(|read| message.first_seen_at > *read)
+        })
+    }
+
+    /// Stops marking messages as new: what's read now is the new baseline.
+    fn clear_new(&mut self) {
+        self.arrived = Some(self.last_read.clone());
+    }
+
+    /// Read marks that changed since last asked, for the server to keep.
+    pub fn take_reads(&mut self) -> Vec<(String, Timestamp)> {
+        self.reads_out.drain().collect()
+    }
+
+    fn set_read(&mut self, channel: &str, through: Timestamp) {
+        let read = self.last_read.entry(channel.to_owned()).or_insert(Timestamp::UNIX_EPOCH);
+        if through > *read {
+            *read = through;
+            self.reads_out.insert(channel.to_owned(), through);
+        }
     }
 
     /// The name of the one node whose key starts with `hop` (hex).
@@ -606,22 +697,58 @@ impl App {
         view.kind().is_none_or(|kind| self.cursors[slot(kind)].is_none())
     }
 
-    pub fn visible_nodes(&self) -> Vec<&NodeInfo> {
+    /// The nodes view's rows. Every node heard advertising, most recently
+    /// seen first, then any contact the observers haven't heard; or, with
+    /// [`radio_only`](Self::radio_only), the radio's contacts in its own
+    /// order, so the last non-favourite is the one it replaces next.
+    pub fn node_rows(&self) -> Vec<NodeRow<'_>> {
+        let contacts = self.radio_contacts();
+        let by_key: HashMap<&str, &RadioContact> =
+            contacts.iter().map(|contact| (contact.pubkey.as_str(), *contact)).collect();
+        let rows: Vec<NodeRow> = if self.radio_only {
+            let nodes: HashMap<&str, &NodeInfo> =
+                self.nodes.iter().map(|node| (node.pubkey.as_str(), node)).collect();
+            contacts
+                .iter()
+                .map(|contact| NodeRow {
+                    pubkey: &contact.pubkey,
+                    node: nodes.get(contact.pubkey.as_str()).copied(),
+                    contact: Some(contact),
+                })
+                .collect()
+        } else {
+            let heard: HashSet<&str> = self.nodes.iter().map(|node| node.pubkey.as_str()).collect();
+            self.nodes
+                .iter()
+                .map(|node| NodeRow {
+                    pubkey: &node.pubkey,
+                    node: Some(node),
+                    contact: by_key.get(node.pubkey.as_str()).copied(),
+                })
+                .chain(contacts.iter().filter(|c| !heard.contains(c.pubkey.as_str())).map(
+                    |contact| NodeRow {
+                        pubkey: &contact.pubkey,
+                        node: None,
+                        contact: Some(contact),
+                    },
+                ))
+                .collect()
+        };
         let needle = self.filters.get(&View::Nodes).map(|filter| filter.text.to_lowercase());
-        self.nodes
-            .iter()
-            .filter(|node| {
+        rows.into_iter()
+            .filter(|row| {
                 needle.as_ref().is_none_or(|needle| {
-                    [
-                        node.name.as_deref().unwrap_or_default(),
-                        node.role.as_deref().unwrap_or_default(),
-                        &node.pubkey,
-                    ]
-                    .iter()
-                    .any(|field| field.to_lowercase().contains(needle.as_str()))
+                    [row.name().unwrap_or_default(), row.role().unwrap_or_default(), row.pubkey]
+                        .iter()
+                        .any(|field| field.to_lowercase().contains(needle.as_str()))
                 })
             })
             .collect()
+    }
+
+    fn selected_node(&self) -> Option<NodeRow<'_>> {
+        let rows = self.node_rows();
+        rows.get(self.node_selected.min(rows.len().saturating_sub(1))).copied()
     }
 
     /// Everything exchanged with each node, newest conversation first and
@@ -682,6 +809,62 @@ impl App {
         conversations
     }
 
+    /// Whether a conversation is with a room server: its posts name their
+    /// authors, or an advert says so.
+    pub fn is_room(&self, conversation: &Conversation) -> bool {
+        conversation.messages.iter().any(|message| message.author.is_some())
+            || self.nodes.iter().any(|node| {
+                node.role.as_deref() == Some("room-server")
+                    && node.name.as_deref() == Some(conversation.who.as_str())
+            })
+    }
+
+    /// The list beside the messages: every channel, then rooms, then
+    /// people, each conversation newest first.
+    pub fn places(&self) -> Vec<Place> {
+        let mut places = vec![Place::All];
+        places.extend(self.ordered_channels().iter().map(|c| Place::Channel(c.name.clone())));
+        let (rooms, people): (Vec<_>, Vec<_>) =
+            self.conversations().into_iter().partition(|thread| self.is_room(thread));
+        places.extend(rooms.into_iter().map(|thread| Place::Room(thread.who)));
+        places.extend(people.into_iter().map(|thread| Place::Person(thread.who)));
+        places
+    }
+
+    /// The place the messages tab is showing.
+    pub fn place(&self) -> Place {
+        match self.view {
+            View::Dms => {
+                let conversations = self.conversations();
+                match self.selected_conversation(&conversations) {
+                    Some((_, thread)) if self.is_room(thread) => Place::Room(thread.who.clone()),
+                    Some((_, thread)) => Place::Person(thread.who.clone()),
+                    None => Place::All,
+                }
+            }
+            _ => self.channel.clone().map_or(Place::All, Place::Channel),
+        }
+    }
+
+    /// Shows `place`: a channel's messages, or a conversation.
+    fn go_to(&mut self, place: Place) {
+        match place {
+            Place::All => {
+                self.switch(View::Messages);
+                self.select_channel(None);
+            }
+            Place::Channel(name) => {
+                self.switch(View::Messages);
+                self.select_channel(Some(name));
+            }
+            Place::Room(who) | Place::Person(who) => {
+                self.switch(View::Dms);
+                self.correspondent = Some(who);
+                self.dm_scroll = 0;
+            }
+        }
+    }
+
     /// The conversation the DM view is showing, and where it sits in the
     /// list.
     pub fn selected_conversation<'a>(
@@ -712,21 +895,9 @@ impl App {
 
     /// The radio's contacts, favourites first and then the most recently
     /// heard, so the last non-favourite is the one the radio replaces next.
-    pub fn visible_contacts(&self) -> Vec<&RadioContact> {
-        let needle = self.filters.get(&View::Contacts).map(|filter| filter.text.to_lowercase());
-        let mut contacts: Vec<&RadioContact> = self
-            .contacts
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter(|contact| {
-                needle.as_ref().is_none_or(|needle| {
-                    [contact.name.as_str(), contact.kind.as_str(), contact.pubkey.as_str()]
-                        .iter()
-                        .any(|field| field.to_lowercase().contains(needle.as_str()))
-                })
-            })
-            .collect();
+    fn radio_contacts(&self) -> Vec<&RadioContact> {
+        let mut contacts: Vec<&RadioContact> =
+            self.contacts.as_deref().unwrap_or_default().iter().collect();
         contacts.sort_by(|a, b| {
             b.favourite
                 .cmp(&a.favourite)
@@ -748,29 +919,15 @@ impl App {
             .map(|contact| contact.pubkey.as_str())
     }
 
-    fn selected_contact(&self) -> Option<&RadioContact> {
-        let contacts = self.visible_contacts();
-        contacts.get(self.contact_selected.min(contacts.len().saturating_sub(1))).copied()
-    }
-
-    /// Pins or unpins what's selected: a contact in the contacts view, or a
-    /// node in the nodes view, which adds it to the radio.
+    /// Keeps the selected node on the radio, adding it if needed, or lets
+    /// a kept one go.
     fn pin_selected(&mut self) -> Vec<Command> {
-        let (to, pinned, what) = match self.view {
-            View::Contacts => match self.selected_contact() {
-                Some(contact) => (contact.name.clone(), !contact.favourite, contact.name.clone()),
-                None => return Vec::new(),
-            },
-            View::Nodes => {
-                let nodes = self.visible_nodes();
-                let Some(node) = nodes.get(self.node_selected) else {
-                    return Vec::new();
-                };
-                let to = node.name.clone().unwrap_or_else(|| node.pubkey[..12].to_owned());
-                (to.clone(), true, to)
-            }
-            _ => return Vec::new(),
+        let Some(row) = self.selected_node() else {
+            return Vec::new();
         };
+        let pinned = !row.contact.is_some_and(|contact| contact.favourite);
+        let to = row.label();
+        let what = to.clone();
         self.status = Some(if pinned {
             format!("keeping {what} on the radio…")
         } else {
@@ -801,8 +958,8 @@ impl App {
         self.input = Some(Input::new(Prompt::Compose, prefix.unwrap_or_default()));
     }
 
-    /// Opens a conversation with whatever is selected in the nodes or
-    /// contacts view, ready to write.
+    /// Opens a conversation with whoever is selected: a node, or the sender
+    /// of a message, ready to write.
     fn write_to_selected(&mut self) {
         let who = match self.view {
             View::Messages => match self.selected_message() {
@@ -812,11 +969,7 @@ impl App {
                     return;
                 }
             },
-            View::Contacts => self.selected_contact().map(|contact| contact.name.clone()),
-            View::Nodes => self
-                .visible_nodes()
-                .get(self.node_selected)
-                .map(|node| node.name.clone().unwrap_or_else(|| node.pubkey[..12].to_owned())),
+            View::Nodes => self.selected_node().map(|row| row.label()),
             _ => None,
         };
         let Some(who) = who else {
@@ -977,14 +1130,28 @@ impl App {
                         None => Reach { from: i64::MAX, exhausted: true },
                     };
                     feed.reach.insert(None, reach);
-                    if kind == Kind::Messages {
-                        self.mark_read(None);
-                    }
                 }
             }
             Update::Lost(kind, reason) => self.feed_mut(kind).connection = Connection::Lost(reason),
             Update::Channels(channels) => {
                 self.ordering = false;
+                for channel in &channels {
+                    match channel.read_through {
+                        Some(read) => {
+                            let local = self.last_read.entry(channel.name.clone()).or_insert(read);
+                            *local = (*local).max(read);
+                        }
+                        // Never read: start counting from now, rather than
+                        // calling everything ever heard on it unread.
+                        None => {
+                            let at = channel.last_message_at.unwrap_or(Timestamp::UNIX_EPOCH);
+                            self.set_read(&channel.name, at);
+                        }
+                    }
+                }
+                if self.arrived.is_none() {
+                    self.arrived = Some(self.last_read.clone());
+                }
                 let selected = self.channel_at_selection();
                 self.channels = channels;
                 self.channel_selected =
@@ -1102,8 +1269,11 @@ impl App {
             let shown = self.view == View::Messages
                 && self.cursors[slot(Kind::Messages)].is_none()
                 && self.channel.as_ref().is_none_or(|channel| *channel == message.channel);
-            if alerting && shown {
-                self.last_read.insert(message.channel.clone(), message.id);
+            // Watching a channel that's all read keeps it read; a message
+            // arriving doesn't count as reading the ones before it.
+            if alerting && shown && !self.unread().contains_key(message.channel.as_str()) {
+                let (channel, at) = (message.channel.clone(), message.first_seen_at);
+                self.set_read(&channel, at);
             }
         }
         let feed = self.feed_mut(kind);
@@ -1113,14 +1283,23 @@ impl App {
         }
     }
 
-    /// Counts every stored message on `channel` (or every channel) as read.
+    /// Counts every message on `channel` (or every channel) as read.
     fn mark_read(&mut self, channel: Option<&str>) {
+        let mut newest: HashMap<String, Timestamp> = HashMap::new();
+        for info in &self.channels {
+            if let Some(at) = info.last_message_at {
+                newest.insert(info.name.clone(), at);
+            }
+        }
         for event in self.feeds[slot(Kind::Messages)].events.values() {
-            if let Event::Message(message) = event
-                && channel.is_none_or(|channel| channel == message.channel)
-            {
-                let read = self.last_read.entry(message.channel.clone()).or_default();
-                *read = (*read).max(message.id);
+            if let Event::Message(message) = event {
+                let at = newest.entry(message.channel.clone()).or_insert(message.first_seen_at);
+                *at = (*at).max(message.first_seen_at);
+            }
+        }
+        for (name, at) in newest {
+            if channel.is_none_or(|channel| channel == name) {
+                self.set_read(&name, at);
             }
         }
     }
@@ -1170,12 +1349,9 @@ impl App {
 
         match key.code {
             KeyCode::Char('q') => self.quit = true,
-            KeyCode::Char(digit @ '1'..='9') => {
-                let view = View::ALL[usize::from(digit as u8 - b'1')];
-                self.show(view);
-                if view == View::Channels {
-                    return self.load_undecrypted();
-                }
+            KeyCode::Char(digit @ '1'..='5') => {
+                let view = self.tab_views[usize::from(digit as u8 - b'1')];
+                return self.show(view);
             }
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('/') => self.prompt(Prompt::Filter),
@@ -1189,8 +1365,20 @@ impl App {
                 View::Messages | View::Dms => self.sidebar_focus = !self.sidebar_focus,
                 View::Alerts => self.watch_focus = !self.watch_focus,
                 View::Channels => self.undecrypted_focus = !self.undecrypted_focus,
-                _ => {}
+                View::Nodes => {
+                    self.radio_only = !self.radio_only;
+                    self.node_selected = 0;
+                }
+                View::Packets => self.switch(View::Rf),
+                View::Rf => self.switch(View::Packets),
+                View::Health => {}
             },
+            KeyCode::Char('e') if matches!(self.view, View::Messages | View::Dms) => {
+                return self.show(View::Channels);
+            }
+            KeyCode::Char('e') | KeyCode::Esc if self.view == View::Channels => {
+                return self.show(View::Messages);
+            }
             KeyCode::Esc => {
                 if self.sidebar_focus {
                     self.sidebar_focus = false;
@@ -1227,20 +1415,20 @@ impl App {
                 self.alerts.clear();
                 self.alert_selected = 0;
             }
-            KeyCode::Char('c')
-                if matches!(self.view, View::Messages | View::Dms | View::Contacts) =>
-            {
+            KeyCode::Char('c') if matches!(self.view, View::Messages | View::Dms) => {
                 self.prompt(Prompt::Compose);
             }
             KeyCode::Char('a') => self.prompt(Prompt::Advert),
-            KeyCode::Char('p') if matches!(self.view, View::Contacts | View::Nodes) => {
-                return self.pin_selected();
+            KeyCode::Char('p') if self.view == View::Nodes => return self.pin_selected(),
+            KeyCode::Char('n') if matches!(self.view, View::Messages | View::Dms) => {
+                self.prompt(Prompt::Recipient);
             }
-            KeyCode::Char('n') if self.view == View::Dms => self.prompt(Prompt::Recipient),
             KeyCode::Char('r') if self.view == View::Messages => self.reply_to_selected(),
-            KeyCode::Char('m')
-                if matches!(self.view, View::Nodes | View::Contacts | View::Messages) =>
-            {
+            KeyCode::Char('x') if self.view == View::Messages => {
+                self.clear_new();
+                self.status = Some("no longer marking messages as new".into());
+            }
+            KeyCode::Char('m') if matches!(self.view, View::Nodes | View::Messages) => {
                 self.write_to_selected();
             }
             _ => {}
@@ -1248,23 +1436,37 @@ impl App {
         Vec::new()
     }
 
-    fn show(&mut self, view: View) {
-        self.view = view;
+    /// Shows `view`, fetching what it needs.
+    fn show(&mut self, view: View) -> Vec<Command> {
+        self.switch(view);
         self.sidebar_focus = false;
         if view == View::Alerts {
             self.unseen_alerts = 0;
         }
+        if view == View::Channels {
+            return self.load_undecrypted();
+        }
+        Vec::new()
+    }
+
+    /// Changes view within a tab, keeping focus where it is.
+    fn switch(&mut self, view: View) {
+        self.view = view;
+        self.tab_views[view.tab()] = view;
     }
 
     fn follow(&mut self) {
+        if matches!(self.view, View::Messages | View::Dms) && self.sidebar_focus {
+            if let Some(last) = self.places().pop() {
+                self.go_to(last);
+            }
+            return;
+        }
         match self.view.kind() {
             Some(kind) => self.cursors[slot(kind)] = None,
             // A plain list has no newest to follow, so End goes to its end.
             None => match self.view {
-                View::Contacts => {
-                    self.contact_selected = self.visible_contacts().len().saturating_sub(1);
-                }
-                View::Nodes => self.node_selected = self.visible_nodes().len().saturating_sub(1),
+                View::Nodes => self.node_selected = self.node_rows().len().saturating_sub(1),
                 View::Channels if self.undecrypted_focus => {
                     self.undecrypted_selected = self.undecrypted_list().len().saturating_sub(1);
                 }
@@ -1283,17 +1485,8 @@ impl App {
 
     fn move_by(&mut self, delta: isize) -> Vec<Command> {
         match self.view {
-            View::Messages if self.sidebar_focus => {
+            View::Messages | View::Dms if self.sidebar_focus => {
                 self.move_sidebar(delta);
-                Vec::new()
-            }
-            View::Dms if self.sidebar_focus => {
-                let conversations = self.conversations();
-                let current = self.selected_conversation(&conversations).map_or(0, |(at, _)| at);
-                let last = conversations.len().saturating_sub(1);
-                self.correspondent =
-                    conversations.get(step(current, delta, last)).map(|thread| thread.who.clone());
-                self.dm_scroll = 0;
                 Vec::new()
             }
             View::Dms => {
@@ -1303,13 +1496,8 @@ impl App {
                 self.dm_scroll = self.dm_scroll.saturating_add_signed(back);
                 Vec::new()
             }
-            View::Contacts => {
-                let last = self.visible_contacts().len().saturating_sub(1);
-                self.contact_selected = step(self.contact_selected, delta, last);
-                Vec::new()
-            }
             View::Nodes => {
-                let last = self.visible_nodes().len().saturating_sub(1);
+                let last = self.node_rows().len().saturating_sub(1);
                 self.node_selected = step(self.node_selected, delta, last);
                 Vec::new()
             }
@@ -1365,12 +1553,11 @@ impl App {
     }
 
     fn move_sidebar(&mut self, delta: isize) {
-        let names: Vec<Option<String>> = std::iter::once(None)
-            .chain(self.ordered_channels().iter().map(|channel| Some(channel.name.clone())))
-            .collect();
-        let current = names.iter().position(|name| *name == self.channel).unwrap_or(0);
-        let target = step(current, delta, names.len() - 1);
-        self.select_channel(names[target].clone());
+        let places = self.places();
+        let current = self.place();
+        let at = places.iter().position(|place| *place == current).unwrap_or(0);
+        let target = places[step(at, delta, places.len() - 1)].clone();
+        self.go_to(target);
     }
 
     /// Asks for history older than the feed holds, matching the view.
@@ -1419,10 +1606,7 @@ impl App {
 
     fn prompt(&mut self, prompt: Prompt) {
         if prompt == Prompt::Watch
-            && matches!(
-                self.view,
-                View::Dms | View::Nodes | View::Health | View::Contacts | View::Channels
-            )
+            && matches!(self.view, View::Dms | View::Nodes | View::Health | View::Channels)
         {
             self.status = Some("watches apply to messages, packets and RF".into());
             return;
@@ -1733,7 +1917,7 @@ fn step(current: usize, delta: isize, last: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use ferromesh_model::{MessageEvent, ObservationEvent};
+    use ferromesh_model::{DirectMessageInfo, ObservationEvent};
     use jiff::Timestamp;
 
     use super::*;
@@ -1871,7 +2055,7 @@ mod tests {
         assert!(app.take_bell());
         assert!(!app.take_bell());
 
-        press(&mut app, KeyCode::Char('6'));
+        press(&mut app, KeyCode::Char('2'));
         assert_eq!(app.unseen_alerts, 0);
         assert_eq!(press(&mut app, KeyCode::Enter), [Command::Inspect(format!("{:016X}", 3))]);
     }
@@ -1886,36 +2070,71 @@ mod tests {
         assert_eq!(app.heard(app.visible(View::Messages)[0]), 2);
     }
 
-    #[test]
-    fn unread_counts_follow_what_was_shown() {
-        let mut app = with_history(vec![message(1, "#a", "old"), message(2, "#b", "old")]);
-        app.channels = ["#a", "#b"]
-            .iter()
-            .map(|name| ChannelInfo {
-                name: (*name).into(),
-                kind: "hashtag".into(),
-                hash: 0,
-                enabled: true,
-                added_at: Timestamp::UNIX_EPOCH,
-                messages: 1,
-                last_message_at: None,
-                read_through: None,
-                unread: 0,
-            })
-            .collect();
-        let unread = |app: &App, channel| app.unread().get(channel).copied().unwrap_or(0);
-        assert_eq!((unread(&app, "#a"), unread(&app, "#b")), (0, 0));
+    fn message_at(id: i64, channel: &str, second: i64) -> Event {
+        let mut event = message(id, channel, "hi");
+        if let Event::Message(message) = &mut event {
+            message.first_seen_at = Timestamp::from_second(second).unwrap();
+        }
+        event
+    }
 
+    fn read_state(name: &str, read: Option<i64>, unread: i64, last: i64) -> ChannelInfo {
+        ChannelInfo {
+            read_through: read.map(|second| Timestamp::from_second(second).unwrap()),
+            unread,
+            ..channel(name, 9, Some(last))
+        }
+    }
+
+    #[test]
+    fn unread_counts_survive_starting_up() {
+        let at = |second| Timestamp::from_second(second).unwrap();
+        let mut app = with_history(vec![
+            message_at(1, "#a", 1),
+            message_at(2, "#a", 2),
+            message_at(3, "#b", 3),
+        ]);
+        app.apply(Update::Channels(vec![
+            read_state("#a", Some(1), 1, 2),
+            // Never read: counting starts now, not from the beginning.
+            read_state("#b", None, 9, 3),
+            // More unread than the feed holds.
+            read_state("#c", Some(0), 40, 5),
+        ]));
+        let unread = |app: &App, channel| app.unread().get(channel).copied().unwrap_or(0);
+        let counts = |app: &App| [unread(app, "#a"), unread(app, "#b"), unread(app, "#c")];
+        assert_eq!(counts(&app), [1, 0, 40], "starting on All reads nothing");
+        assert_eq!(app.take_reads(), [("#b".to_owned(), at(3))]);
+        let new = |app: &App, event: Event| match event {
+            Event::Message(message) => app.is_new(&message),
+            _ => false,
+        };
+        assert!(new(&app, message_at(2, "#a", 2)) && !new(&app, message_at(1, "#a", 1)));
+
+        // Showing #a reads it, but its message stays marked new.
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Down);
         assert_eq!(app.channel.as_deref(), Some("#a"));
-        app.apply(Update::Event(message(3, "#a", "shown")));
-        app.apply(Update::Event(message(4, "#b", "elsewhere")));
-        assert_eq!((unread(&app, "#a"), unread(&app, "#b")), (0, 1));
-        assert_eq!(ids(&app, View::Messages), [1, 3]);
+        assert_eq!(counts(&app), [0, 0, 40]);
+        assert_eq!(app.take_reads(), [("#a".to_owned(), at(2))]);
+        assert!(new(&app, message_at(2, "#a", 2)));
 
-        press(&mut app, KeyCode::Down);
-        assert_eq!((app.channel.as_deref(), unread(&app, "#b")), (Some("#b"), 0));
+        // Live messages: read where they're shown, unread elsewhere.
+        app.apply(Update::Event(message_at(4, "#a", 4)));
+        app.apply(Update::Event(message_at(5, "#b", 5)));
+        assert_eq!(counts(&app), [0, 1, 40]);
+        assert_eq!(app.take_reads(), [("#a".to_owned(), at(4))]);
+
+        // Reading #c reads through its newest message, held or not.
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.place(), Place::Channel("#c".into()));
+        assert_eq!(counts(&app), [0, 1, 0]);
+        assert_eq!(app.take_reads(), [("#c".to_owned(), at(5))]);
+
+        // x stops marking anything new.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Char('x'));
+        assert!(!new(&app, message_at(2, "#a", 2)));
     }
 
     #[test]
@@ -1982,7 +2201,7 @@ mod tests {
         assert_eq!(saved, [Command::SaveWatches(vec![expected])]);
         assert!(app.is_watched(app.visible(View::Messages)[0]));
 
-        press(&mut app, KeyCode::Char('6'));
+        press(&mut app, KeyCode::Char('2'));
         press(&mut app, KeyCode::Tab);
         assert_eq!(press(&mut app, KeyCode::Char('d')), [Command::SaveWatches(Vec::new())]);
         assert!(!app.is_watched(app.visible(View::Messages)[0]));
@@ -2111,11 +2330,11 @@ mod tests {
     #[test]
     fn adding_a_channel() {
         let mut app = with_history(Vec::new());
-        assert_eq!(press(&mut app, KeyCode::Char('9')), [Command::LoadUndecrypted]);
+        assert_eq!(press(&mut app, KeyCode::Char('e')), [Command::LoadUndecrypted]);
         assert!(!app.idle(), "waits for the undecrypted list");
         // Coming back while it loads doesn't ask again.
-        press(&mut app, KeyCode::Char('1'));
-        assert_eq!(press(&mut app, KeyCode::Char('9')), []);
+        press(&mut app, KeyCode::Char('e'));
+        assert_eq!(press(&mut app, KeyCode::Char('e')), []);
 
         press(&mut app, KeyCode::Char('+'));
         type_text(&mut app, "wx");
@@ -2135,7 +2354,7 @@ mod tests {
     #[test]
     fn guessing_names_for_undecrypted_traffic() {
         let mut app = with_history(Vec::new());
-        press(&mut app, KeyCode::Char('9'));
+        press(&mut app, KeyCode::Char('e'));
         let unknown = |hash: u8, packets: i64| UnknownChannel {
             hash,
             packets,
@@ -2219,7 +2438,7 @@ mod tests {
             channel("#a", 1, Some(30)),
             channel("#b", 9, Some(20)),
         ]));
-        press(&mut app, KeyCode::Char('9'));
+        press(&mut app, KeyCode::Char('e'));
         press(&mut app, KeyCode::Down);
         let order = |names: &[&str]| {
             vec![Command::OrderChannels(names.iter().map(|name| name.to_string()).collect())]
@@ -2240,7 +2459,7 @@ mod tests {
         assert_eq!(app.channel_at_selection().as_deref(), Some("#b"));
 
         // From the messages view's sidebar, the channel it shows moves.
-        press(&mut app, KeyCode::Char('1'));
+        press(&mut app, KeyCode::Char('e'));
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::Down);
         press(&mut app, KeyCode::Down);
@@ -2257,7 +2476,7 @@ mod tests {
             channel("#b", 9, Some(20)),
             channel("#quiet", 0, None),
         ]));
-        press(&mut app, KeyCode::Char('9'));
+        press(&mut app, KeyCode::Char('e'));
         press(&mut app, KeyCode::Down);
         assert_eq!(channel_names(&app), ["public", "#a", "#b", "#quiet"]);
 
@@ -2281,5 +2500,62 @@ mod tests {
 
         press(&mut app, KeyCode::Char('o'));
         assert_eq!(app.channel_sort, ChannelSort::Own);
+    }
+
+    fn dm(id: i64, sender: &str, author: Option<&str>) -> DirectMessageInfo {
+        DirectMessageInfo {
+            id,
+            received_at: Timestamp::from_second(id).unwrap(),
+            to: "scw".into(),
+            sender: Some(sender.into()),
+            sender_prefix: "d2aa11bb22cc".into(),
+            hops: None,
+            txt_type: if author.is_some() { txt_type::SIGNED_PLAIN } else { 0 },
+            sender_timestamp: Timestamp::UNIX_EPOCH,
+            author: author.map(str::to_owned),
+            author_prefix: None,
+            snr: None,
+            body: "hi".into(),
+        }
+    }
+
+    #[test]
+    fn one_list_holds_channels_rooms_and_people() {
+        let mut app = with_history(Vec::new());
+        app.apply(Update::Channels(vec![channel("public", 1, None)]));
+        app.apply(Update::Dms(Ok(vec![dm(1, "Ann", None), dm(2, "PeakMesh Room", Some("Bob"))])));
+        assert_eq!(
+            app.places(),
+            [
+                Place::All,
+                Place::Channel("public".into()),
+                Place::Room("PeakMesh Room".into()),
+                Place::Person("Ann".into()),
+            ]
+        );
+
+        // Moving down the list goes from channels into conversations, and
+        // back up again, keeping the list focused.
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Down);
+        assert_eq!((app.view, app.channel.as_deref()), (View::Messages, Some("public")));
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.view, View::Dms);
+        assert_eq!(app.place(), Place::Room("PeakMesh Room".into()));
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.place(), Place::Person("Ann".into()));
+        assert!(app.sidebar_focus);
+        press(&mut app, KeyCode::Home);
+        assert_eq!((app.view, app.place()), (View::Messages, Place::All));
+
+        // Each tab remembers its view.
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Char('4'));
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.view, View::Rf);
+        press(&mut app, KeyCode::Char('1'));
+        assert_eq!(app.view, View::Dms);
+        press(&mut app, KeyCode::Char('4'));
+        assert_eq!(app.view, View::Rf);
     }
 }

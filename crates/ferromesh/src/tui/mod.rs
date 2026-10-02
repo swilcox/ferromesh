@@ -12,6 +12,7 @@ mod overlay;
 mod svg;
 mod ui;
 
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,9 +21,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use crossterm::event::{Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use ferromesh_model::{
-    AdvertRequest, AdvertSent, ChannelAdded, ChannelInfo, ChannelOrder, DirectMessageInfo, Event,
-    GuessChannels, GuessReport, HistoryQuery, Kind, MAX_NODES, NodeInfo, ObserverHealth,
-    PacketDetail, PinRequest, RadioContact, SendRequest, SentMessageInfo, UnknownChannel,
+    AdvertRequest, AdvertSent, ChannelAdded, ChannelInfo, ChannelOrder, ChannelRead, ChannelReads,
+    DirectMessageInfo, Event, GuessChannels, GuessReport, HistoryQuery, Kind, MAX_NODES, NodeInfo,
+    ObserverHealth, PacketDetail, PinRequest, RadioContact, SendRequest, SentMessageInfo,
+    UnknownChannel,
 };
 use futures_util::StreamExt;
 use jiff::Timestamp;
@@ -77,17 +79,28 @@ pub async fn run(server: Server, token: Option<String>, snapshot: Option<Snapsho
     }
     let (order, orders) = mpsc::unbounded_channel();
     let ordering = tokio::spawn(keep_order(server.clone(), token.clone(), orders, updates.clone()));
+    let (reads, marks) = mpsc::unbounded_channel();
+    let reading = tokio::spawn(keep_reads(server.clone(), token.clone(), marks, updates.clone()));
     let result = match snapshot {
-        // A snapshot never writes the watch file.
+        // A snapshot never writes the watch file, or marks anything read.
         Some(snapshot) => {
-            let network = Network { server, updates, dir: None, token, order };
+            drop(reads);
+            let network = Network { server, updates, dir: None, token, order, reads: None };
             snap(app, &network, received, snapshot).await
         }
-        None => interactive(app, &Network { server, updates, dir, token, order }, received).await,
+        None => {
+            let network = Network { server, updates, dir, token, order, reads: Some(reads) };
+            interactive(app, &network, received).await
+        }
     };
-    // The network is gone, so the last order is on its way: give it time to
-    // arrive, so moving a channel just before quitting isn't lost.
-    let _ = tokio::time::timeout(ORDER_GRACE, ordering).await;
+    // The network is gone, so the last order and read marks are on their
+    // way: give them time to arrive, so what was done just before quitting
+    // isn't lost.
+    let _ = tokio::time::timeout(ORDER_GRACE, async {
+        let _ = ordering.await;
+        let _ = reading.await;
+    })
+    .await;
     streams.abort_all();
     result
 }
@@ -115,6 +128,7 @@ async fn event_loop(
     let mut dms = tokio::time::interval(DM_REFRESH);
     let mut clock = tokio::time::interval(Duration::from_secs(1));
     while !app.quit {
+        network.mark_read(app.take_reads());
         app.now = Timestamp::now();
         terminal.draw(|frame| ui::draw(frame, app, &mut screen))?;
         if app.take_bell() {
@@ -142,6 +156,8 @@ async fn event_loop(
             _ = clock.tick() => {}
         }
     }
+    // Marks made by the last key before quitting still go out.
+    network.mark_read(app.take_reads());
     Ok(())
 }
 
@@ -237,6 +253,8 @@ struct Network {
     token: Option<String>,
     /// Channel orders for [`keep_order`] to send.
     order: UnboundedSender<Vec<String>>,
+    /// Read marks for [`keep_reads`] to send; `None` for a snapshot.
+    reads: Option<UnboundedSender<Vec<(String, Timestamp)>>>,
 }
 
 impl Network {
@@ -376,6 +394,12 @@ impl Network {
         }
     }
 
+    fn mark_read(&self, reads: Vec<(String, Timestamp)>) {
+        if let (Some(sender), false) = (&self.reads, reads.is_empty()) {
+            let _ = sender.send(reads);
+        }
+    }
+
     fn refresh(&self) {
         let (server, updates) = (self.server.clone(), self.updates.clone());
         tokio::spawn(async move { fetch_lists(&server, &updates).await });
@@ -433,6 +457,39 @@ async fn keep_order(
                 // Back to the order the server has.
                 fetch_channels(&server, &updates).await;
             }
+        }
+    }
+}
+
+/// Sends read marks, a batch at a time: everything marked while the last
+/// batch was on its way goes in the next, each channel at its newest mark.
+/// Without the token nothing is kept, which is said once.
+async fn keep_reads(
+    server: Arc<Server>,
+    token: Option<String>,
+    mut marks: UnboundedReceiver<Vec<(String, Timestamp)>>,
+    updates: UnboundedSender<Update>,
+) {
+    let mut warned = false;
+    while let Some(first) = marks.recv().await {
+        let mut batch: HashMap<String, Timestamp> = HashMap::new();
+        let mut add = |reads: Vec<(String, Timestamp)>| {
+            for (name, through) in reads {
+                let at = batch.entry(name).or_insert(through);
+                *at = (*at).max(through);
+            }
+        };
+        add(first);
+        while let Ok(more) = marks.try_recv() {
+            add(more);
+        }
+        let reads = batch.into_iter().map(|(name, through)| ChannelRead { name, through });
+        let request = ChannelReads { reads: reads.collect() };
+        let result = server.put_empty("/api/v1/channels/read", &request, token.as_deref()).await;
+        if let (Err(error), false) = (result, warned) {
+            warned = true;
+            let status = format!("what you read isn't being kept: {error:#}");
+            let _ = updates.send(Update::Status(status));
         }
     }
 }

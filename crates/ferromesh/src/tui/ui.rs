@@ -12,9 +12,12 @@ use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use super::app::{App, ChannelSort, Connection, Conversation, DmLine, Input, Prompt, View};
+use super::app::{App, ChannelSort, Connection, DmLine, Input, Place, Prompt, TABS, View};
 use super::{emoji, lists, overlay};
 use crate::render::name_hash;
+
+/// The width of the list beside the messages.
+const SIDEBAR: u16 = 26;
 
 /// Names are coloured by hash, as in `tail`.
 const PALETTE: [Color; 10] = [
@@ -33,9 +36,7 @@ const PALETTE: [Color; 10] = [
 /// What scrolling position each list keeps between frames.
 #[derive(Debug, Default)]
 pub struct Screen {
-    pub channels: usize,
-    pub correspondents: usize,
-    pub contacts: usize,
+    pub places: usize,
     pub channel_list: usize,
     pub undecrypted: usize,
     pub messages: usize,
@@ -54,12 +55,11 @@ pub fn draw(frame: &mut Frame, app: &App, screen: &mut Screen) {
     match app.view {
         View::Messages => draw_messages(frame, body, app, screen),
         View::Dms => draw_dms(frame, body, app, screen),
+        View::Channels => lists::draw_channels(frame, body, app, screen),
         View::Packets | View::Rf => lists::draw_events(frame, body, app, screen),
         View::Nodes => lists::draw_nodes(frame, body, app, screen),
         View::Alerts => lists::draw_alerts(frame, body, app, screen),
         View::Health => lists::draw_health(frame, body, app),
-        View::Contacts => lists::draw_contacts(frame, body, app, screen),
-        View::Channels => lists::draw_channels(frame, body, app, screen),
     }
     draw_footer(frame, footer, app);
     if let Some(inspector) = &app.inspector {
@@ -122,14 +122,14 @@ pub fn text_lines(buffer: &Buffer) -> Vec<String> {
 fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     let mut tabs =
         vec![Span::styled(" ferromesh ", Style::new().bold().black().on_cyan()), " ".into()];
-    for (index, view) in View::ALL.into_iter().enumerate() {
-        let label = format!(" {} {} ", index + 1, view.title());
-        tabs.push(if view == app.view {
+    for (index, (title, views)) in TABS.into_iter().enumerate() {
+        let label = format!(" {} {title} ", index + 1);
+        tabs.push(if views.contains(&app.view) {
             Span::styled(label, Style::new().bold().reversed())
         } else {
             Span::raw(label)
         });
-        if view == View::Alerts && app.unseen_alerts > 0 {
+        if views.contains(&View::Alerts) && app.unseen_alerts > 0 {
             let count = format!(" {} ", app.unseen_alerts);
             tabs.push(Span::styled(count, Style::new().bold().black().on_yellow()));
         }
@@ -260,23 +260,30 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
         (None, Some(problem)) => Line::from(Span::styled(problem, Color::Red)),
         (None, None) => {
             let hints = match app.view {
+                View::Messages if app.sidebar_focus => {
+                    "j/k pick  J/K/T move  o sort  n new DM  e organize  Tab back  ? help"
+                }
                 View::Messages => {
-                    "Tab channels  c compose  r reply  m write  + add channel  / filter  ? help"
+                    "Tab list  c compose  r reply  m DM sender  e organize  x unmark new  ? help"
                 }
                 View::Channels if app.undecrypted_focus => {
                     "Tab channels  s guess names  + add the guess  ? help  q quit"
                 }
                 View::Channels => {
-                    "Tab undecrypted  Enter read  J/K/T move  o sort  + add  s guess  ? help"
+                    "Tab undecrypted  Enter read  J/K/T move  o sort  + add  s guess  e done"
                 }
-                View::Packets | View::Rf => {
-                    "/ filter  w watch  Enter inspect  g/G top/end  ? help  q quit"
+                View::Packets => {
+                    "Tab receptions  / filter  w watch  Enter inspect  g/G top/end  ? help"
                 }
-                View::Dms => "Tab people  c reply  j/k scroll  ? help  q quit",
-                View::Nodes => "/ search  m write  p keep as a contact  ? help  q quit",
-                View::Contacts => {
-                    "p keep or release  m write  / search  a advertise  ? help  q quit"
+                View::Rf => "Tab packets  / filter  w watch  Enter inspect  g/G top/end  ? help",
+                View::Dms if app.sidebar_focus => {
+                    "j/k pick  n new DM  e organize channels  Tab back  ? help  q quit"
                 }
+                View::Dms => "Tab list  c write  j/k scroll  n new DM  ? help  q quit",
+                View::Nodes if app.radio_only => {
+                    "Tab all nodes  p keep or release  m write  / search  a advertise  ? help"
+                }
+                View::Nodes => "Tab on the radio  p keep or release  m write  / search  ? help",
                 View::Health => {
                     "from each observer's status reports; refreshed every minute  ? help"
                 }
@@ -293,8 +300,8 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
 
 fn draw_messages(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
     let [sidebar, feed] =
-        Layout::horizontal([Constraint::Length(26), Constraint::Fill(1)]).areas(area);
-    draw_channels(frame, sidebar, app, screen);
+        Layout::horizontal([Constraint::Length(SIDEBAR), Constraint::Fill(1)]).areas(area);
+    draw_places(frame, sidebar, app, screen);
 
     let title = app.channel.as_deref().unwrap_or("All channels");
     let block = pane(Line::from(title), !app.sidebar_focus);
@@ -309,11 +316,27 @@ fn draw_messages(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) 
     }
     let selected = app.selected(View::Messages, &visible);
     let width = usize::from(inner.width);
+    // In one channel, a line above the first message that was new when the
+    // TUI started; across all of them, a mark beside each.
+    let is_new = |event: &Event| matches!(event, Event::Message(m) if app.is_new(m));
+    let first_new = visible.iter().position(|event| is_new(event));
+    let new_count = visible.iter().filter(|event| is_new(event)).count();
+    let divider = |index: usize| {
+        (app.channel.is_some() && first_new == Some(index)).then(|| {
+            let label = format!(" {new_count} new since you started ");
+            let rule = "─".repeat(width.saturating_sub(label.chars().count() + 2) / 2);
+            Line::from(format!("{rule}{label}{rule}")).yellow()
+        })
+    };
     // The top row always carries its date; that doesn't change heights.
     let lines = |index: usize, top: bool| {
         let previous =
             if top { None } else { index.checked_sub(1).map(|index| at(visible[index])) };
-        message_lines(app, visible[index], previous, width)
+        let mut lines = message_lines(app, visible[index], previous, width);
+        if let Some(divider) = divider(index) {
+            lines.insert(0, divider);
+        }
+        lines
     };
     let rows =
         window(visible.len(), selected, usize::from(inner.height), &mut screen.messages, |index| {
@@ -339,8 +362,13 @@ fn message_lines(
     let Event::Message(message) = event else {
         return Vec::new();
     };
+    let marker = if app.channel.is_none() && !app.is_watched(event) && app.is_new(message) {
+        Span::styled("•", Color::Yellow)
+    } else {
+        watch_marker(app, event)
+    };
     let mut prefix = vec![
-        watch_marker(app, event),
+        marker,
         Span::raw(day_label(app, message.first_seen_at, previous)).dim(),
         Span::raw(format!("{} ", clock(app, message.first_seen_at))).dim(),
     ];
@@ -378,7 +406,9 @@ pub(super) fn body_spans(body: &str) -> Vec<Span<'static>> {
         .collect()
 }
 
-fn draw_channels(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
+/// The list beside the messages: all channels, each channel with its
+/// unread count, then rooms and people with when you last heard from them.
+fn draw_places(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
     let title = match app.channel_sort {
         ChannelSort::Own => Line::from("Channels"),
         sort => Line::from(vec!["Channels ".into(), Span::raw(sort.label()).dim()]),
@@ -388,43 +418,78 @@ fn draw_channels(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) 
     frame.render_widget(block, area);
 
     let unread = app.unread();
-    let names: Vec<Option<&str>> = std::iter::once(None)
-        .chain(app.ordered_channels().into_iter().map(|channel| Some(channel.name.as_str())))
-        .collect();
-    let selected = names.iter().position(|name| *name == app.channel.as_deref());
-    let rows =
-        window(names.len(), selected, usize::from(inner.height), &mut screen.channels, |_| 1);
+    let conversations = app.conversations();
+    let places = app.places();
+    let current = app.place();
     let width = usize::from(inner.width);
-    let items: Vec<ListItem> = names[rows.clone()]
-        .iter()
-        .map(|name| {
-            let count = match name {
-                Some(name) => unread.get(name).copied().unwrap_or(0),
-                None => unread.values().sum(),
-            };
-            let badge = if count > 0 { format!(" {count}") } else { String::new() };
-            let label = truncate(name.unwrap_or("All"), width.saturating_sub(badge.len() + 1));
-            let pad = width.saturating_sub(Span::raw(label.as_str()).width() + badge.len() + 1);
-            let color = name.map_or(Color::Reset, name_color);
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" {label}"), color),
-                Span::raw(" ".repeat(pad)),
-                Span::styled(badge, Style::new().bold().yellow()),
-            ]))
-        })
-        .collect();
+    // Rows are places, with a heading where rooms and people start.
+    let mut items: Vec<ListItem> = Vec::new();
+    let mut selected = None;
+    let mut heading = None;
+    for place in &places {
+        let section = match place {
+            Place::All | Place::Channel(_) => None,
+            Place::Room(_) => Some("Rooms"),
+            Place::Person(_) => Some("People"),
+        };
+        if section.is_some() && section != heading {
+            heading = section;
+            items.push(ListItem::new(Line::from(section.unwrap_or_default()).bold().cyan()));
+        }
+        if *place == current {
+            selected = Some(items.len());
+        }
+        let (name, note, note_style) = match place {
+            Place::All => {
+                let count: usize = unread.values().sum();
+                ("All", badge(count), Style::new().bold().yellow())
+            }
+            Place::Channel(name) => {
+                let count = unread.get(name.as_str()).copied().unwrap_or(0);
+                (name.as_str(), badge(count), Style::new().bold().yellow())
+            }
+            Place::Room(who) | Place::Person(who) => {
+                let thread = conversations.iter().find(|thread| thread.who == *who);
+                // Someone picked but not yet written to has no time to show.
+                let when = match thread {
+                    Some(thread) if !thread.messages.is_empty() => ago(app, thread.last_at()),
+                    _ => "new".to_owned(),
+                };
+                (who.as_str(), when, Style::new().dim())
+            }
+        };
+        let label = truncate(name, width.saturating_sub(note.len() + 2));
+        let pad = width.saturating_sub(Span::raw(label.as_str()).width() + note.len() + 1);
+        let color = if matches!(place, Place::All) { Color::Reset } else { name_color(name) };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!(" {label}"), color),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(note, note_style),
+        ])));
+    }
+    if !places.iter().any(|place| matches!(place, Place::Person(_))) {
+        items.push(ListItem::new(Line::from("People").bold().cyan()));
+        items.push(ListItem::new(Line::from(" n writes to someone").dim()));
+    }
+
+    let rows = window(items.len(), selected, usize::from(inner.height), &mut screen.places, |_| 1);
+    let shown: Vec<ListItem> = items.into_iter().skip(rows.start).take(rows.len()).collect();
     let mut state = ListState::default().with_selected(selected.map(|index| index - rows.start));
     let style = if app.sidebar_focus { highlight() } else { Style::new().bold() };
-    frame.render_stateful_widget(List::new(items).highlight_style(style), inner, &mut state);
+    frame.render_stateful_widget(List::new(shown).highlight_style(style), inner, &mut state);
+}
+
+fn badge(count: usize) -> String {
+    if count > 0 { count.to_string() } else { String::new() }
 }
 
 /// Direct messages: who you've exchanged them with, and one conversation.
 fn draw_dms(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
     let [sidebar, thread] =
-        Layout::horizontal([Constraint::Length(20), Constraint::Fill(1)]).areas(area);
+        Layout::horizontal([Constraint::Length(SIDEBAR), Constraint::Fill(1)]).areas(area);
+    draw_places(frame, sidebar, app, screen);
     let conversations = app.conversations();
     let selected = app.selected_conversation(&conversations);
-    draw_correspondents(frame, sidebar, app, &conversations, selected.map(|(at, _)| at), screen);
 
     let title = selected.map_or("Direct messages", |(_, thread)| thread.who.as_str());
     let block = pane(Line::from(title), !app.sidebar_focus);
@@ -519,49 +584,6 @@ fn delivery(message: &DmLine) -> Option<String> {
         (None, Some(snr)) => Some(format!("direct, SNR {snr:.1}")),
         (None, None) => None,
     }
-}
-
-fn draw_correspondents(
-    frame: &mut Frame,
-    area: Rect,
-    app: &App,
-    conversations: &[Conversation],
-    selected: Option<usize>,
-    screen: &mut Screen,
-) {
-    let block = pane(Line::from("People"), app.sidebar_focus);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let rows = window(
-        conversations.len(),
-        selected,
-        usize::from(inner.height),
-        &mut screen.correspondents,
-        |_| 1,
-    );
-    let width = usize::from(inner.width);
-    let items: Vec<ListItem> = conversations[rows.clone()]
-        .iter()
-        .map(|thread| {
-            // Someone picked but not yet written to has no time to show.
-            let when = if thread.messages.is_empty() {
-                "new".to_owned()
-            } else {
-                ago(app, thread.last_at())
-            };
-            let label = truncate(&thread.who, width.saturating_sub(when.len() + 2));
-            let pad = width.saturating_sub(Span::raw(label.as_str()).width() + when.len() + 2);
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" {label}"), name_color(&thread.who)),
-                Span::raw(" ".repeat(pad)),
-                Span::raw(when).dim(),
-            ]))
-        })
-        .collect();
-    let mut state = ListState::default().with_selected(selected.map(|index| index - rows.start));
-    let style = if app.sidebar_focus { highlight() } else { Style::new().bold() };
-    frame.render_stateful_widget(List::new(items).highlight_style(style), inner, &mut state);
 }
 
 /// A bordered pane, brighter when it has the keyboard.
@@ -835,13 +857,42 @@ mod tests {
             let lines = render(&app(), 140, 6);
             assert!(lines[0].starts_with(" ferromesh "), "{lines:#?}");
             assert!(lines[0].ends_with("● rf  mesh:7373"), "{lines:#?}");
-            assert!(render(&app(), 100, 6)[0].ends_with("● ● ●"), "narrow header keeps its tabs");
+            assert!(render(&app(), 80, 6)[0].ends_with("● ● ●"), "narrow header keeps its tabs");
             assert!(
                 lines[2].contains("│ Sep 13 14:03:22 #wx            Bob: storm rolling in  ×3"),
                 "{lines:#?}"
             );
             assert!(lines[3].starts_with("│ #wx"), "{lines:#?}");
-            assert!(lines[5].starts_with("Tab channels"), "{lines:#?}");
+            assert!(lines[5].starts_with("Tab list"), "{lines:#?}");
+        }
+
+        #[test]
+        fn messages_new_since_starting() {
+            // The server's first channel list says #wx was read five minutes
+            // before its message.
+            let template = app();
+            let mut app = App::new("mesh:7373".into(), Vec::new());
+            app.zone = TimeZone::UTC;
+            app.now = template.now;
+            let mut channels = template.channels.clone();
+            channels[0].read_through = Some(app.now - jiff::SignedDuration::from_mins(5));
+            channels[0].unread = 1;
+            app.apply(Update::Channels(channels));
+            for event in template.visible(View::Messages) {
+                app.apply(Update::Event(event.clone()));
+            }
+            for kind in Kind::ALL {
+                app.apply(Update::CaughtUp(kind));
+            }
+            let lines = render(&app, 100, 8);
+            assert!(lines[3].starts_with("│ #wx                   1│"), "{lines:#?}");
+            assert!(lines[2].contains("│•Sep 13"), "marked across all channels\n{lines:#?}");
+
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::Down);
+            let lines = render(&app, 100, 8);
+            assert!(lines[2].contains("─ 1 new since you started ─"), "{lines:#?}");
+            assert!(lines[3].starts_with("│ #wx                    │"), "read now\n{lines:#?}");
         }
 
         #[test]
@@ -932,7 +983,10 @@ mod tests {
                 packet_hash: None,
             }]));
 
-            press(&mut app, KeyCode::Char('2'));
+            // People are listed under the channels; End goes to the last.
+            press(&mut app, KeyCode::Tab);
+            press(&mut app, KeyCode::End);
+            press(&mut app, KeyCode::Tab);
             let lines = render(&app, 100, 20).join("\n");
             for expected in
                 ["People", "KK4SW", "them: are you there?", "2 hops", "you: here now", "✓ 0.6 s"]
@@ -951,7 +1005,7 @@ mod tests {
         }
 
         #[test]
-        fn contacts() {
+        fn nodes_and_contacts() {
             let mut app = app();
             let at = app.now;
             let contact =
@@ -969,10 +1023,26 @@ mod tests {
                 contact("Stale One", false, 900, Some(1)),
             ])));
 
-            press(&mut app, KeyCode::Char('8'));
-            let lines = render(&app, 110, 12).join("\n");
-            for expected in ["Contacts (3 on the radio)", "★", "KK4SW", "kept", "next out", "flood"]
-            {
+            // One node the observers heard, which is also a kept contact.
+            app.apply(Update::Nodes(vec![NodeInfo {
+                pubkey: format!("{:02x}", "KK4SW".len()).repeat(16),
+                name: Some("KK4SW".into()),
+                role: Some("chat".into()),
+                first_seen_at: at,
+                last_seen_at: at,
+                adverts: 4,
+                lat: None,
+                lon: None,
+            }]));
+            press(&mut app, KeyCode::Char('3'));
+            let lines = render(&app, 120, 12).join("\n");
+            assert!(lines.contains("Nodes (3) · 3 on the radio"), "{lines}");
+            let kk4sw = lines.lines().filter(|line| line.contains("KK4SW")).count();
+            assert_eq!(kk4sw, 1, "a node and its contact share a row\n{lines}");
+
+            press(&mut app, KeyCode::Tab);
+            let lines = render(&app, 120, 12).join("\n");
+            for expected in ["on the radio (3 of 3)", "★", "KK4SW", "kept", "next out", "flood"] {
                 assert!(lines.contains(expected), "{expected:?} missing from\n{lines}");
             }
             // Favourites first, then whoever was heard most recently; the
@@ -1012,8 +1082,7 @@ mod tests {
                 app.handle(TermEvent::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)))
             };
 
-            // n in the DM view asks who, then opens the compose line.
-            press(&mut app, KeyCode::Char('2'));
+            // n asks who, then opens the compose line.
             press(&mut app, KeyCode::Char('n'));
             type_in(&mut app, "KQ8B");
             assert!(enter(&mut app).is_empty(), "naming someone sends nothing by itself");
@@ -1039,7 +1108,7 @@ mod tests {
                 lat: None,
                 lon: None,
             }]));
-            press(&mut app, KeyCode::Char('5'));
+            press(&mut app, KeyCode::Char('3'));
             press(&mut app, KeyCode::Char('m'));
             type_in(&mut app, "yo");
             assert_eq!(enter(&mut app), [Command::Send { to: "Alice".into(), text: "yo".into() }]);
@@ -1065,7 +1134,7 @@ mod tests {
         #[test]
         fn channels() {
             let mut app = app();
-            press(&mut app, KeyCode::Char('9'));
+            press(&mut app, KeyCode::Char('e'));
             let lines = render(&app, 100, 14).join("\n");
             assert!(lines.contains("loading…"), "{lines}");
             let at = app.now;
@@ -1146,8 +1215,14 @@ mod tests {
         fn every_view_at_any_size() {
             for (width, height) in [(40, 10), (100, 30)] {
                 let mut app = app();
-                for key in ['1', '2', '3', '4', '5', '6', '7', '8', '9'] {
-                    press(&mut app, KeyCode::Char(key));
+                // Every tab, and the other views behind e and Tab.
+                for keys in ["1", "1e", "1e\t", "1e", "1\t", "2", "3", "3\t", "4", "4\t", "5"] {
+                    for key in keys.chars() {
+                        press(
+                            &mut app,
+                            if key == '\t' { KeyCode::Tab } else { KeyCode::Char(key) },
+                        );
+                    }
                     render(&app, width, height);
                     press(&mut app, KeyCode::Char('?'));
                     render(&app, width, height);

@@ -1,5 +1,5 @@
-//! The views besides messages: packets, RF, nodes, alerts, health, contacts
-//! and channels.
+//! The views besides messages: traffic, nodes, alerts, health, and organizing
+//! channels.
 
 use ferromesh_model::{Event, Guess, Kind, ObservationEvent, ObserverState, PacketEvent};
 use jiff::Timestamp;
@@ -22,7 +22,7 @@ pub fn draw_events(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen
         return;
     };
     let visible = app.visible(view);
-    let title = format!("{} ({})", view.title(), visible.len());
+    let title = format!("Traffic · {} ({})", view.title().to_lowercase(), visible.len());
     let block = pane(Line::from(title), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -200,122 +200,85 @@ pub(super) fn path(app: &App, hops: &[String]) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Every node heard advertising, with what the radio holds of each: kept
+/// (a favourite, never replaced), on the radio, or the contact it would
+/// replace next. On the radio's own list, contacts come in its order, by the
+/// advert each last sent: that timestamp is the sender's own clock and some
+/// are wrong, but it's what the radio goes by when it makes room.
 pub fn draw_nodes(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
-    let nodes = app.visible_nodes();
-    let block = pane(Line::from(format!("Nodes ({})", nodes.len())), true);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-    if nodes.is_empty() {
-        let note = if app.nodes.is_empty() { "no nodes yet" } else { "no nodes match" };
-        frame.render_widget(Paragraph::new(note).dim(), inner);
-        return;
-    }
-    let selected = Some(app.node_selected.min(nodes.len() - 1));
-    let height = usize::from(inner.height.saturating_sub(1));
-    let rows = ui::window(nodes.len(), selected, height, &mut screen.nodes, |_| 1);
-    let body: Vec<Row> = nodes[rows.clone()]
-        .iter()
-        .map(|node| {
-            let name = node.name.clone().unwrap_or_else(|| "(unnamed)".into());
-            let location = match (node.lat, node.lon) {
-                (Some(lat), Some(lon)) => format!("{lat:.4}, {lon:.4}"),
-                _ => String::new(),
-            };
-            let first_seen = node.first_seen_at.to_zoned(app.zone.clone()).strftime("%Y-%m-%d");
-            Row::new(vec![
-                Cell::from(Span::styled(
-                    name.clone(),
-                    Style::new().bold().fg(ui::name_color(&name)),
-                )),
-                Cell::from(Span::raw(node.role.clone().unwrap_or_default()).dim()),
-                Cell::from(Line::from(ui::ago(app, node.last_seen_at)).right_aligned()),
-                Cell::from(Span::raw(first_seen.to_string()).dim()),
-                Cell::from(Line::from(node.adverts.to_string()).right_aligned()),
-                Cell::from(Span::raw(location).dim()),
-                Cell::from(Span::raw(node.pubkey.clone()).dark_gray()),
-            ])
-        })
-        .collect();
-    let widths = [
-        Constraint::Length(24),
-        Constraint::Length(11),
-        Constraint::Length(5),
-        Constraint::Length(10),
-        Constraint::Length(7),
-        Constraint::Length(19),
-        Constraint::Fill(1),
-    ];
-    let header =
-        header(&["name", "role", "seen", "first seen", "adverts", "location", "public key"]);
-    let mut state = TableState::default().with_selected(selected.map(|index| index - rows.start));
-    let table = Table::new(body, widths).header(header).row_highlight_style(ui::highlight());
-    frame.render_stateful_widget(table, inner, &mut state);
-}
-
-/// The radio's contact list: who it can exchange direct messages with,
-/// favourites first, then by the advert each one last sent. That timestamp
-/// is the sender's own clock, and some are wrong, but it's what the radio
-/// itself goes by when it replaces the contact it heard from least
-/// recently — so the last row is the one to go.
-pub fn draw_contacts(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen) {
-    let contacts = app.visible_contacts();
+    let rows_shown = app.node_rows();
     let held = app.contacts.as_ref().map(Vec::len).unwrap_or_default();
-    let title = if contacts.len() == held {
-        format!("Contacts ({held} on the radio)")
+    let title = if app.radio_only {
+        format!("Nodes · on the radio ({} of {held})", rows_shown.len())
     } else {
-        format!("Contacts ({} of {held})", contacts.len())
+        format!("Nodes ({}) · {held} on the radio", rows_shown.len())
     };
     let block = pane(Line::from(title), true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    if let Err(error) = &app.contacts {
+    if let (true, Err(error)) = (app.radio_only, &app.contacts) {
         let note = format!("couldn't load the radio's contacts: {error}");
         frame.render_widget(Paragraph::new(note).red().wrap(Wrap { trim: true }), inner);
         return;
     }
-    if contacts.is_empty() {
-        let note = if held == 0 {
-            "the radio has no contacts yet; it adds chat radios as it hears them advertise"
-        } else {
-            "no contacts match"
+    if rows_shown.is_empty() {
+        let note = match (app.radio_only, app.filter_text(View::Nodes)) {
+            (_, Some(_)) => "no nodes match",
+            (true, None) => {
+                "the radio has no contacts yet; it adds chat radios as it hears them advertise"
+            }
+            (false, None) => "no nodes yet",
         };
         frame.render_widget(Paragraph::new(note).dim().wrap(Wrap { trim: true }), inner);
         return;
     }
     let next_out = app.next_replaced();
-    let selected = Some(app.contact_selected.min(contacts.len() - 1));
+    let selected = Some(app.node_selected.min(rows_shown.len() - 1));
     let height = usize::from(inner.height.saturating_sub(1));
-    let rows = ui::window(contacts.len(), selected, height, &mut screen.contacts, |_| 1);
-    let body: Vec<Row> = contacts[rows.clone()]
+    let rows = ui::window(rows_shown.len(), selected, height, &mut screen.nodes, |_| 1);
+    let body: Vec<Row> = rows_shown[rows.clone()]
         .iter()
-        .map(|contact| {
-            let route =
-                contact.route_hops.map_or_else(|| "flood".into(), |hops| format!("{hops} hops"));
-            // The timestamp inside the advert, which is the sender's own
-            // clock and sometimes wrong, so it's shown as a date rather than
-            // as time ago. The radio orders its contacts by it all the same.
-            let advert = contact
-                .last_advert
-                .map(|at| at.to_zoned(app.zone.clone()).strftime("%Y-%m-%d %H:%M").to_string())
-                .unwrap_or_default();
-            let note = if contact.favourite {
-                Span::raw("kept").cyan()
-            } else if next_out == Some(contact.pubkey.as_str()) {
-                Span::raw("next out").yellow()
-            } else {
-                Span::raw("")
+        .map(|row| {
+            let name = row.name().unwrap_or("(unnamed)").to_owned();
+            let favourite = row.contact.is_some_and(|contact| contact.favourite);
+            let radio = match row.contact {
+                Some(contact) if contact.favourite => Span::raw("kept").cyan(),
+                Some(contact) if next_out == Some(contact.pubkey.as_str()) => {
+                    Span::raw("next out").yellow()
+                }
+                Some(_) => Span::raw("on radio").dim(),
+                None => Span::raw(""),
             };
+            let route = row.contact.map_or_else(String::new, |contact| {
+                contact.route_hops.map_or_else(|| "flood".into(), |hops| format!("{hops} hops"))
+            });
+            // Heard by the observers, or failing that the clock in the
+            // advert the radio holds, which is the sender's and may be off.
+            let seen = match (row.node, row.contact.and_then(|contact| contact.last_advert)) {
+                (Some(node), _) => Span::raw(ui::ago(app, node.last_seen_at)),
+                (None, Some(at)) => {
+                    Span::raw(at.to_zoned(app.zone.clone()).strftime("%Y-%m-%d").to_string()).dim()
+                }
+                (None, None) => Span::raw(""),
+            };
+            let location = match row.node.and_then(|node| node.lat.zip(node.lon)) {
+                Some((lat, lon)) => format!("{lat:.4}, {lon:.4}"),
+                None => String::new(),
+            };
+            let adverts = row.node.map(|node| node.adverts.to_string()).unwrap_or_default();
             Row::new(vec![
-                Cell::from(Span::raw(if contact.favourite { "★" } else { " " }).cyan()),
+                Cell::from(Span::raw(if favourite { "★" } else { " " }).cyan()),
                 Cell::from(Span::styled(
-                    contact.name.clone(),
-                    Style::new().bold().fg(ui::name_color(&contact.name)),
+                    name.clone(),
+                    Style::new().bold().fg(ui::name_color(&name)),
                 )),
-                Cell::from(Span::raw(contact.kind.clone()).dim()),
+                Cell::from(Span::raw(row.role().unwrap_or_default().to_owned()).dim()),
+                Cell::from(Line::from(seen).right_aligned()),
+                Cell::from(Line::from(adverts).right_aligned()),
+                Cell::from(radio),
                 Cell::from(Span::raw(route).dim()),
-                Cell::from(Line::from(advert).right_aligned()),
-                Cell::from(note),
-                Cell::from(Span::raw(contact.pubkey[..12].to_owned()).dark_gray()),
+                Cell::from(Span::raw(location).dim()),
+                Cell::from(Span::raw(row.pubkey.to_owned()).dark_gray()),
             ])
         })
         .collect();
@@ -323,12 +286,24 @@ pub fn draw_contacts(frame: &mut Frame, area: Rect, app: &App, screen: &mut Scre
         Constraint::Length(1),
         Constraint::Length(24),
         Constraint::Length(11),
+        Constraint::Length(10),
         Constraint::Length(7),
-        Constraint::Length(16),
         Constraint::Length(8),
+        Constraint::Length(7),
+        Constraint::Length(19),
         Constraint::Fill(1),
     ];
-    let header = header(&["", "name", "kind", "route", "advert clock", "", "public key"]);
+    let header = header(&[
+        "",
+        "name",
+        "role",
+        "seen",
+        "adverts",
+        "radio",
+        "route",
+        "location",
+        "public key",
+    ]);
     let mut state = TableState::default().with_selected(selected.map(|index| index - rows.start));
     let table = Table::new(body, widths).header(header).row_highlight_style(ui::highlight());
     frame.render_stateful_widget(table, inner, &mut state);
