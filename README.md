@@ -9,7 +9,7 @@
 
 A MeshCore radio shows you the messages meant for you. ferromesh keeps the rest: every packet, every reception, who heard what and how strongly, and what it all decodes to. It listens through a **companion radio** on USB, through an **MQTT broker** fed by observer repeaters, or both, and serves it all to a command line and a terminal UI.
 
-<img alt="The terminal UI's Messages view: a channel list beside one feed of every channel, each message with how many radios heard it." src="docs/screenshots/messages.svg">
+<img alt="The terminal UI's Messages tab: a list of channels and people beside one feed of every channel, each message with how many radios heard it." src="docs/screenshots/messages.svg">
 
 ## What you can do
 
@@ -18,7 +18,7 @@ A MeshCore radio shows you the messages meant for you. ferromesh keeps the rest:
 - **Search the history.** One filter language covers sender, channel, text, packet type, signal and hop count, in the CLI, the TUI and alerts alike: `ferromesh query from:BNA* storm --since 6h`.
 - **See signal and coverage.** Every reception carries its SNR, RSSI and path, with repeaters named along the route. Open any packet to see it from every radio that heard it, its bytes labelled field by field.
 - **Message from the terminal.** Send to channels and nodes, keep DM conversations, post to room servers, and see who heard your message or whether it was acknowledged.
-- **Get alerted.** Save any filter as a watch. Matching traffic is highlighted, rings the bell, and lands in the Alerts view.
+- **Get alerted.** Save any filter as a watch. Matching traffic is highlighted, rings the bell, and lands in the Alerts tab.
 - **Know your radios are well.** Battery, noise floor, airtime and restarts over time, plus a check that every packet a repeater counted actually reached the database.
 - **Build on it.** An HTTP API for history and a WebSocket stream that resumes where it left off, JSON throughout.
 - **Never lose anything.** Every record is appended verbatim to a raw log before it touches the database, so the database can always be rebuilt and checked against it.
@@ -26,13 +26,13 @@ A MeshCore radio shows you the messages meant for you. ferromesh keeps the rest:
 <details>
 <summary>More of the terminal UI</summary>
 
-Every reception, with signal strength and the repeaters it came through:
+Traffic: every reception, with signal strength and the repeaters it came through:
 
-<img alt="The RF view: one row per reception, with observer, packet type, hop count, an SNR bar, RSSI and the path by repeater name." src="docs/screenshots/rf.svg">
+<img alt="The Traffic tab's receptions: one row per reception, with observer, packet type, hop count, an SNR bar, RSSI and the path by repeater name." src="docs/screenshots/rf.svg">
 
 Each observer's health, with a day of hourly trends:
 
-<img alt="The Health view: battery, noise floor, packets, errors, airtime and delivery for three observers, each with a sparkline." src="docs/screenshots/health.svg">
+<img alt="The Health tab: battery, noise floor, packets, errors, airtime and delivery for three observers, each with a sparkline." src="docs/screenshots/health.svg">
 
 </details>
 
