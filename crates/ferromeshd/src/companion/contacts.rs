@@ -223,7 +223,7 @@ pub fn pin_sender<L: Read + Write>(
         [node] => contact_from(node),
         // Not in the directory, but the radio read the message, so it has
         // the sender.
-        _ => match session.list_contacts()?.into_iter().find(|c| c.pubkey[..6] == prefix[..]) {
+        _ => match session.contacts()?.into_iter().find(|c| c.pubkey[..6] == prefix[..]) {
             Some(contact) => contact,
             None => return Ok(()),
         },

@@ -418,7 +418,7 @@ fn handle<L: Read + Write>(
             result.map(|_| ())
         }
         Request::Contacts { reply } => {
-            let result = session.list_contacts();
+            let result = session.contacts();
             let _ = reply.send(
                 result.as_ref().map(Clone::clone).map_err(|e| SendError::Failed(format!("{e:#}"))),
             );

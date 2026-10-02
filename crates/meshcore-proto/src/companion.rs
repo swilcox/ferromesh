@@ -72,6 +72,7 @@ pub mod code {
     pub const CHANNEL_DATA_RECV: u8 = 27;
 
     pub const PUSH_ADVERT: u8 = 0x80;
+    pub const PUSH_PATH_UPDATED: u8 = 0x81;
     pub const PUSH_LOGIN_SUCCESS: u8 = 0x85;
     pub const PUSH_LOGIN_FAILED: u8 = 0x86;
     pub const PUSH_SEND_CONFIRMED: u8 = 0x82;
@@ -228,6 +229,13 @@ pub fn get_contacts() -> Vec<u8> {
     vec![command::GET_CONTACTS]
 }
 
+/// Lists only the contacts changed after `since`, a time in the radio's
+/// clock as [`Frame::EndOfContacts`] reports it. [`Frame::ContactsStart`]
+/// still counts every contact.
+pub fn get_contacts_since(since: u32) -> Vec<u8> {
+    [&[command::GET_CONTACTS][..], &since.to_le_bytes()].concat()
+}
+
 /// With `manual` on, only the node types in the auto-add policy are added
 /// when their adverts are heard; with it off, every node is. Leaves the
 /// radio's other settings alone.
@@ -351,7 +359,9 @@ pub enum Frame<'a> {
     /// How many contacts [`get_contacts`] is about to list.
     ContactsStart(u32),
     Contact(Contact),
-    EndOfContacts,
+    /// The newest change among the contacts listed, in the radio's clock;
+    /// `None` from firmware that doesn't say.
+    EndOfContacts(Option<u32>),
     AutoAddConfig {
         policy: u8,
         max_hops: u8,
@@ -389,7 +399,7 @@ impl<'a> Frame<'a> {
             }),
             code::CONTACTS_START => Self::ContactsStart(r.u32_le()?),
             code::CONTACT => Self::Contact(Contact::read(&mut r)?),
-            code::END_OF_CONTACTS => Self::EndOfContacts,
+            code::END_OF_CONTACTS => Self::EndOfContacts(r.u32_le().ok()),
             code::AUTOADD_CONFIG => Self::AutoAddConfig { policy: r.u8()?, max_hops: r.u8()? },
             code::SENT => Self::Sent(Sent {
                 flood: r.u8()? != 0,
@@ -859,9 +869,11 @@ mod tests {
             Frame::ContactsStart(259)
         );
         assert_eq!(
-            Frame::parse(&[code::END_OF_CONTACTS, 0, 0, 0, 0]).unwrap(),
-            Frame::EndOfContacts
+            Frame::parse(&[code::END_OF_CONTACTS, 0x10, 0x27, 0, 0]).unwrap(),
+            Frame::EndOfContacts(Some(10_000))
         );
+        assert_eq!(Frame::parse(&[code::END_OF_CONTACTS]).unwrap(), Frame::EndOfContacts(None));
+        assert_eq!(get_contacts_since(10_000), [command::GET_CONTACTS, 0x10, 0x27, 0, 0]);
         assert_eq!(
             Frame::parse(&[code::AUTOADD_CONFIG, 3, 0]).unwrap(),
             Frame::AutoAddConfig { policy: 3, max_hops: 0 }

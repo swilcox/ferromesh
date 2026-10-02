@@ -12,12 +12,18 @@ use anyhow::{Context, Result, bail};
 use jiff::Timestamp;
 use meshcore_proto::companion::{
     self, ChannelInfo, Contact, Deframer, DeviceInfo, Frame, LoggedIn, SelfInfo, Sent, StatsKind,
-    autoadd, code, error,
+    autoadd, code, command, error,
 };
 use tracing::{debug, info};
 
 /// How long a command may take to answer.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the contact list is served from memory when nothing says it
+/// changed: the radio pushes adverts, path updates and deletions, and our
+/// own writes are seen here, so this only covers anything missed.
+const CONTACTS_FRESH: Duration = Duration::from_secs(5 * 60);
+/// How often the whole contact list is read again, whatever else happens.
+const CONTACTS_FULL: Duration = Duration::from_secs(60 * 60);
 /// More queued messages than the radio can hold, so a runaway loop stops.
 const MAX_DRAIN: usize = 64;
 const APP_NAME: &str = "ferromeshd";
@@ -66,6 +72,30 @@ pub struct Session<L> {
     slots: Option<Vec<ChannelInfo>>,
     /// Login answers that arrived while we were doing something else.
     logins: Vec<LoginResult>,
+    /// The contact list as last read; see [`Session::contacts`].
+    contacts: Option<ContactCache>,
+}
+
+/// The radio's contact list, kept so that clients asking every minute don't
+/// each make the radio list hundreds of contacts: listing them all is slow,
+/// and a run of full listings has left the radio unresponsive.
+struct ContactCache {
+    contacts: Vec<Contact>,
+    /// The newest change listed, in the radio's clock; `None` when the
+    /// firmware doesn't say, so every refresh lists everything.
+    changed: Option<u32>,
+    /// Something may have changed since the last read.
+    stale: bool,
+    checked: Instant,
+    full: Instant,
+}
+
+/// One contact listing.
+struct Listing {
+    contacts: Vec<Contact>,
+    /// Every contact the radio holds, whether listed or not.
+    total: u32,
+    changed: Option<u32>,
 }
 
 /// What a node said when we asked to log in.
@@ -121,6 +151,7 @@ impl<L: Read + Write> Session<L> {
             timeout,
             slots: None,
             logins: Vec::new(),
+            contacts: None,
         };
         let reply = session.request(&companion::device_query())?;
         let Frame::DeviceInfo(device) = Frame::parse(&reply)? else {
@@ -340,18 +371,74 @@ impl<L: Read + Write> Session<L> {
         Ok(Ok(held))
     }
 
-    /// Every contact on the radio.
+    /// Every contact on the radio, read from it now.
     pub fn list_contacts(&mut self) -> Result<Vec<Contact>> {
-        let reply = self.request(&companion::get_contacts())?;
-        let Frame::ContactsStart(count) = Frame::parse(&reply)? else {
+        Ok(self.read_contacts(None)?.contacts)
+    }
+
+    /// Every contact on the radio, from memory while nothing has changed;
+    /// otherwise only the contacts changed since the last read are listed,
+    /// and the whole list only when that doesn't add up, or hourly.
+    pub fn contacts(&mut self) -> Result<Vec<Contact>> {
+        let now = Instant::now();
+        if let Some(cache) = &self.contacts
+            && !cache.stale
+            && now.duration_since(cache.checked) < CONTACTS_FRESH
+        {
+            return Ok(cache.contacts.clone());
+        }
+        let since = self.contacts.as_ref().and_then(|cache| {
+            (now.duration_since(cache.full) < CONTACTS_FULL).then_some(cache.changed).flatten()
+        });
+        if let Some(since) = since {
+            // Changes in the same second as the last read may have come
+            // after it, so that second is listed again.
+            let listing = self.read_contacts(Some(since.saturating_sub(1)))?;
+            let cache = self.contacts.as_mut().expect("a cache to update");
+            for contact in listing.contacts {
+                match cache.contacts.iter_mut().find(|held| held.pubkey == contact.pubkey) {
+                    Some(held) => *held = contact,
+                    None => cache.contacts.push(contact),
+                }
+            }
+            if cache.contacts.len() == listing.total as usize {
+                cache.changed = listing.changed.max(cache.changed);
+                cache.stale = false;
+                cache.checked = now;
+                return Ok(cache.contacts.clone());
+            }
+            // Something went that no push told us about.
+            debug!(held = cache.contacts.len(), total = listing.total, "relisting contacts");
+        }
+        let listing = self.read_contacts(None)?;
+        let contacts = listing.contacts.clone();
+        self.contacts = Some(ContactCache {
+            contacts: listing.contacts,
+            changed: listing.changed,
+            stale: false,
+            checked: now,
+            full: now,
+        });
+        Ok(contacts)
+    }
+
+    /// Lists the contacts changed after `since`, or all of them.
+    fn read_contacts(&mut self, since: Option<u32>) -> Result<Listing> {
+        let command = since.map_or_else(companion::get_contacts, companion::get_contacts_since);
+        let reply = self.request(&command)?;
+        let Frame::ContactsStart(total) = Frame::parse(&reply)? else {
             bail!("unexpected reply {:#04x} to the contact list request", reply[0]);
         };
-        let mut contacts = Vec::with_capacity(count as usize);
+        let mut contacts = Vec::new();
         loop {
             let frame = self.next_reply("listing contacts")?;
             match Frame::parse(&frame)? {
                 Frame::Contact(contact) => contacts.push(contact),
-                Frame::EndOfContacts => return Ok(contacts),
+                // An empty listing reports no change time at all.
+                Frame::EndOfContacts(changed) => {
+                    let changed = changed.filter(|at| *at > 0);
+                    return Ok(Listing { contacts, total, changed });
+                }
                 _ => bail!("unexpected frame {:#04x} while listing contacts", frame[0]),
             }
         }
@@ -437,6 +524,9 @@ impl<L: Read + Write> Session<L> {
 
     /// Sends a command and returns its reply, handling pushes that arrive first.
     fn request(&mut self, command: &[u8]) -> Result<Vec<u8>> {
+        if matches!(command[0], command::ADD_UPDATE_CONTACT | command::SET_AUTOADD_CONFIG) {
+            self.contacts_changed();
+        }
         self.link.write_all(&companion::encode(command)).context("writing to the radio")?;
         self.link.flush().context("writing to the radio")?;
         let deadline = Instant::now() + self.timeout;
@@ -467,12 +557,22 @@ impl<L: Read + Write> Session<L> {
                 }
                 _ => {}
             },
+            code::PUSH_ADVERT
+            | code::PUSH_NEW_ADVERT
+            | code::PUSH_PATH_UPDATED
+            | code::PUSH_CONTACT_DELETED => self.contacts_changed(),
             code::PUSH_CONTACTS_FULL => {
                 info!(
                     "companion radio's contact table is full; its oldest contact will be replaced"
                 );
             }
             other => debug!(code = other, "ignoring a push"),
+        }
+    }
+
+    fn contacts_changed(&mut self) {
+        if let Some(cache) = &mut self.contacts {
+            cache.stale = true;
         }
     }
 
@@ -534,6 +634,10 @@ pub(crate) mod tests {
         /// Channel slots that have been set; slot 0 holds the public channel.
         pub slots: Vec<(u8, Vec<u8>)>,
         pub contacts: Vec<Vec<u8>>,
+        /// When each contact last changed, by key, in a clock that ticks
+        /// once per change; contacts put in directly count as unchanged.
+        pub modified: Vec<([u8; 32], u32)>,
+        pub clock: u32,
     }
 
     /// The radio's frame for a contact added by `stored`, an add command.
@@ -619,14 +723,32 @@ pub(crate) mod tests {
                 command::ADD_UPDATE_CONTACT => {
                     self.contacts.retain(|stored| stored[1..33] != command[1..33]);
                     self.contacts.push(command.to_vec());
+                    self.clock += 1;
+                    let key: [u8; 32] = command[1..33].try_into().unwrap();
+                    self.modified.retain(|(held, _)| *held != key);
+                    self.modified.push((key, self.clock));
                     ok
                 }
+                // As the firmware does: with a time, only contacts changed
+                // after it, but the count is of all of them.
                 command::GET_CONTACTS => {
+                    let since =
+                        command.get(1..5).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()));
                     let count = self.contacts.len() as u32;
+                    let mut newest = 0;
                     for stored in self.contacts.clone() {
-                        self.pushes_after_reply.push(contact_frame(&stored));
+                        let changed = self
+                            .modified
+                            .iter()
+                            .find(|(key, _)| key[..] == stored[1..33])
+                            .map_or(0, |(_, at)| *at);
+                        if command.len() < 5 || changed > since {
+                            newest = newest.max(changed);
+                            self.pushes_after_reply.push(contact_frame(&stored));
+                        }
                     }
-                    self.pushes_after_reply.push(vec![code::END_OF_CONTACTS, 0, 0, 0, 0]);
+                    let end = [&[code::END_OF_CONTACTS][..], &u32::to_le_bytes(newest)].concat();
+                    self.pushes_after_reply.push(end);
                     [&[code::CONTACTS_START][..], &count.to_le_bytes()].concat()
                 }
                 command::GET_AUTOADD_CONFIG => vec![code::AUTOADD_CONFIG, self.autoadd, 0],
@@ -779,6 +901,51 @@ pub(crate) mod tests {
             lat_e6: 0,
             lon_e6: 0,
         }
+    }
+
+    #[test]
+    fn contacts_are_listed_again_only_as_they_change() {
+        let mut session = Session::start(FakeRadio::default()).unwrap();
+        session.add_contact(&contact(1, "KK4SW")).unwrap().unwrap();
+        session.add_contact(&contact(2, "Hilltop")).unwrap().unwrap();
+        let listings = |session: &mut Session<FakeRadio>| -> Vec<Vec<u8>> {
+            let commands = std::mem::take(&mut session.link.commands);
+            commands.into_iter().filter(|c| c[0] == command::GET_CONTACTS).collect()
+        };
+        let names = |contacts: Vec<Contact>| -> Vec<String> {
+            let mut names: Vec<String> = contacts.into_iter().map(|c| c.name).collect();
+            names.sort();
+            names
+        };
+        listings(&mut session);
+
+        // The first ask lists everything; the next is answered from memory.
+        assert_eq!(names(session.contacts().unwrap()), ["Hilltop", "KK4SW"]);
+        assert_eq!(listings(&mut session), [vec![command::GET_CONTACTS]]);
+        assert_eq!(session.contacts().unwrap().len(), 2);
+        assert!(listings(&mut session).is_empty());
+
+        // An advert from a contact: only what changed since is listed.
+        session.link.push(&[code::PUSH_ADVERT, 1, 1, 1]);
+        session.poll(Duration::from_millis(1)).unwrap();
+        assert_eq!(session.contacts().unwrap().len(), 2);
+        assert_eq!(listings(&mut session), [companion::get_contacts_since(1)]);
+
+        // Adding one ourselves is seen too.
+        session.add_contact(&contact(3, "Ridge")).unwrap().unwrap();
+        assert_eq!(names(session.contacts().unwrap()), ["Hilltop", "KK4SW", "Ridge"]);
+        let since = listings(&mut session);
+        assert_eq!(since.last().unwrap(), &companion::get_contacts_since(1));
+
+        // A contact gone: the count no longer adds up, so all are listed.
+        session.link.contacts.retain(|stored| stored[1] != 2);
+        session.link.push(&[code::PUSH_CONTACT_DELETED]);
+        session.poll(Duration::from_millis(1)).unwrap();
+        assert_eq!(names(session.contacts().unwrap()), ["KK4SW", "Ridge"]);
+        assert_eq!(
+            listings(&mut session),
+            [companion::get_contacts_since(2), companion::get_contacts()]
+        );
     }
 
     #[test]
