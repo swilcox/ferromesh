@@ -436,6 +436,7 @@ impl<L: Read + Write> Session<L> {
                 Frame::Contact(contact) => contacts.push(contact),
                 // An empty listing reports no change time at all.
                 Frame::EndOfContacts(changed) => {
+                    debug!(?since, listed = contacts.len(), total, ?changed, "listed contacts");
                     let changed = changed.filter(|at| *at > 0);
                     return Ok(Listing { contacts, total, changed });
                 }
