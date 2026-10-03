@@ -117,3 +117,29 @@ fn nodes_most_recently_heard_first() {
     assert!(nodes[0].first_seen_at < nodes[0].last_seen_at);
     assert_eq!(store.nodes(1).unwrap().len(), 1);
 }
+
+#[test]
+fn a_shared_name_means_the_node_heard_most_recently() {
+    let mut store = Store::open_in_memory().unwrap();
+    let tanyard = observer(1, "Tanyard");
+    // The same name under two keys, as when a radio is reset: the old key
+    // first, then the new one.
+    ingest(
+        &mut store,
+        &[
+            reception(0, &tanyard, &advert(5, 1_789_000_000, 0x81, "Jay 2"), 1.0),
+            reception(1, &tanyard, &advert(6, 1_789_000_100, 0x81, "Jay 2"), 1.0),
+        ],
+    );
+    let new_key = SigningKey::from_bytes(&[6; 32]).verifying_key().to_bytes();
+    match store.send_target("jay 2").unwrap() {
+        ferromesh_store::SendTarget::Node(node) => assert_eq!(node.pubkey, new_key),
+        other => panic!("expected the newer Jay 2, got {other:?}"),
+    }
+    // Each key still names its own node.
+    let old_key = SigningKey::from_bytes(&[5; 32]).verifying_key().to_bytes();
+    match store.send_target(&hex::encode(&old_key[..4])).unwrap() {
+        ferromesh_store::SendTarget::Node(node) => assert_eq!(node.pubkey, old_key),
+        other => panic!("expected the older Jay 2, got {other:?}"),
+    }
+}

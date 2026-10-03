@@ -147,6 +147,9 @@ pub struct NodeContact {
 
 /// Resolves `to`: a known channel by name (any case), else a node by its
 /// exact advertised name (any case), else a node by a hex prefix of its key.
+/// Several nodes with the same name are most often one radio that was
+/// reset and came back with a new key, so the one heard most recently is
+/// meant; a key prefix that matches several stays ambiguous.
 pub(crate) fn send_target(conn: &Connection, to: &str) -> Result<SendTarget> {
     let to = to.trim();
     let channel = conn
@@ -161,7 +164,11 @@ pub(crate) fn send_target(conn: &Connection, to: &str) -> Result<SendTarget> {
 
     let select = "SELECT pubkey, name, role, adv_timestamp, lat_e6, lon_e6 FROM nodes";
     let mut nodes = node_contacts(conn, &format!("{select} WHERE lower(name) = lower(?1)"), [to])?;
-    if nodes.is_empty() && to.len() >= 2 && to.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !nodes.is_empty() {
+        // Most recently heard first.
+        return Ok(SendTarget::Node(nodes.remove(0)));
+    }
+    if to.len() >= 2 && to.bytes().all(|b| b.is_ascii_hexdigit()) {
         nodes = node_contacts(
             conn,
             &format!("{select} WHERE instr(lower(hex(pubkey)), lower(?1)) = 1"),

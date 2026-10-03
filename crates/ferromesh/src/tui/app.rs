@@ -766,6 +766,40 @@ impl App {
             .collect()
     }
 
+    /// Whether another node, or a contact the observers haven't heard, has
+    /// this row's name under a different key: most often a radio that was
+    /// reset and came back with a new one.
+    pub fn shares_name(&self, row: &NodeRow<'_>) -> bool {
+        let Some(name) = row.name() else {
+            return false;
+        };
+        let same = |other: Option<&str>, key: &str| {
+            key != row.pubkey && other.is_some_and(|other| other.eq_ignore_ascii_case(name))
+        };
+        self.nodes.iter().any(|node| same(node.name.as_deref(), &node.pubkey))
+            || self
+                .contacts
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .any(|c| same(Some(&c.name), &c.pubkey))
+    }
+
+    /// How to tell the server which node: its name, or the start of its key
+    /// when the name is shared, so the row picked is the one acted on.
+    fn node_address(&self, row: &NodeRow<'_>) -> String {
+        if self.shares_name(row) { row.pubkey[..12].to_owned() } else { row.label() }
+    }
+
+    /// The node's name, with the start of its key when the name is shared.
+    pub fn node_title(&self, row: &NodeRow<'_>) -> String {
+        if self.shares_name(row) {
+            format!("{} ({})", row.label(), &row.pubkey[..8])
+        } else {
+            row.label()
+        }
+    }
+
     fn selected_node(&self) -> Option<NodeRow<'_>> {
         let rows = self.node_rows();
         rows.get(self.node_selected.min(rows.len().saturating_sub(1))).copied()
@@ -979,8 +1013,8 @@ impl App {
             return Vec::new();
         };
         let pinned = !row.contact.is_some_and(|contact| contact.favourite);
-        let to = row.label();
-        let what = to.clone();
+        let to = self.node_address(&row);
+        let what = self.node_title(&row);
         self.status = Some(if pinned {
             format!("keeping {what} on the radio…")
         } else {
@@ -1022,7 +1056,7 @@ impl App {
                     return;
                 }
             },
-            View::Nodes => self.selected_node().map(|row| row.label()),
+            View::Nodes => self.selected_node().map(|row| self.node_address(&row)),
             _ => None,
         };
         let Some(who) = who else {
@@ -2640,5 +2674,45 @@ mod tests {
         assert_eq!(app.view, View::Dms);
         press(&mut app, KeyCode::Char('4'));
         assert_eq!(app.view, View::Rf);
+    }
+
+    #[test]
+    fn nodes_sharing_a_name_are_told_apart_by_key() {
+        let mut app = with_history(Vec::new());
+        let node = |key: &str, name: &str, second: i64| NodeInfo {
+            pubkey: key.repeat(32),
+            name: Some(name.into()),
+            role: Some("chat".into()),
+            first_seen_at: Timestamp::from_second(second).unwrap(),
+            last_seen_at: Timestamp::from_second(second).unwrap(),
+            adverts: 1,
+            lat: None,
+            lon: None,
+        };
+        // Newest first, as the server lists them.
+        app.apply(Update::Nodes(vec![
+            node("b", "Jay 2", 200),
+            node("a", "Jay 1", 150),
+            node("9", "Jay 2", 100),
+        ]));
+        press(&mut app, KeyCode::Char('3'));
+        let rows = app.node_rows();
+        assert!(app.shares_name(&rows[0]) && !app.shares_name(&rows[1]));
+        assert_eq!(app.node_title(&rows[2]), "Jay 2 (99999999)");
+
+        // p and m act on the row picked, by its key; a unique name is used
+        // as it is.
+        assert_eq!(
+            press(&mut app, KeyCode::Char('p')),
+            [Command::Pin { to: "b".repeat(12), pinned: true }]
+        );
+        press(&mut app, KeyCode::Down);
+        assert_eq!(
+            press(&mut app, KeyCode::Char('p')),
+            [Command::Pin { to: "Jay 1".into(), pinned: true }]
+        );
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Char('m'));
+        assert_eq!(app.correspondent.as_deref(), Some("999999999999"));
     }
 }

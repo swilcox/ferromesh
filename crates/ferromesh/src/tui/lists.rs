@@ -240,6 +240,12 @@ pub fn draw_nodes(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen)
         .iter()
         .map(|row| {
             let name = row.name().unwrap_or("(unnamed)").to_owned();
+            // Two radios under one name: tell them apart by key.
+            let key_hint = if app.shares_name(row) {
+                Span::raw(format!(" {}", &row.pubkey[..8])).dark_gray()
+            } else {
+                Span::raw("")
+            };
             let favourite = row.contact.is_some_and(|contact| contact.favourite);
             let radio = match row.contact {
                 Some(contact) if contact.favourite => Span::raw("kept").cyan(),
@@ -268,10 +274,10 @@ pub fn draw_nodes(frame: &mut Frame, area: Rect, app: &App, screen: &mut Screen)
             let adverts = row.node.map(|node| node.adverts.to_string()).unwrap_or_default();
             Row::new(vec![
                 Cell::from(Span::raw(if favourite { "★" } else { " " }).cyan()),
-                Cell::from(Span::styled(
-                    name.clone(),
-                    Style::new().bold().fg(ui::name_color(&name)),
-                )),
+                Cell::from(Line::from(vec![
+                    Span::styled(name.clone(), Style::new().bold().fg(ui::name_color(&name))),
+                    key_hint,
+                ])),
                 Cell::from(Span::raw(row.role().unwrap_or_default().to_owned()).dim()),
                 Cell::from(Line::from(seen).right_aligned()),
                 Cell::from(Line::from(adverts).right_aligned()),
